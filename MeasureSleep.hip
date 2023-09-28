@@ -50,8 +50,6 @@ int main(int argc, char **argv) try
     void* kernel_args[] = {&sleep_duration};
     dim3 gridDim = {1, 1, 1};
     dim3 blockDim = {512, 1, 1};
-    size_t numBlocks = 1, blockSz = 512;
-
     BEGIN_TIMING(10)
     hipLaunchKernel(kernel, gridDim, blockDim, kernel_args, 0, 0);
     END_TIMING(sleep kernel)
