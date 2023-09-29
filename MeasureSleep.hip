@@ -16,42 +16,56 @@
 
 #define END_TIMING(name) \
         if(i == 0) { \
-            CHK(hipDeviceSynchronize()) \
-            CHK(hipEventRecord( e_start, 0 )) \
+            (void)hipDeviceSynchronize(); \
+            (void)hipEventRecord(e_start, 0); \
         } \
     } \
-    CHK(hipEventRecord( e_end, 0 )) \
-    CHK(hipEventSynchronize( e_end )) \
+    (void)hipEventRecord(e_end, 0); \
+    (void)hipEventSynchronize(e_end); \
     float ms = 0;                  \
-    CHK(hipEventElapsedTime( &ms, e_start, e_end )) \
+    (void)hipEventElapsedTime(&ms, e_start, e_end); \
     if(nIters > 0) ms /= nIters; \
-    fprintf(stderr, "%s time elapsed: %.f ns\n", #name, (ms*1e6)); \
+    printf("%s time elapsed: %.3f us\n", #name, (ms*1e3)); \
     }   
-
-
-__global__ void sleep_kernel(uint32_t num) 
+  
+__global__ void sleep_kernel(uint32_t nclocks) 
 {  
-    for(int i = 0; i < num; i++) {
-        __builtin_amdgcn_s_sleep(10);
+    if(threadIdx.x == 0) {
+        uint32_t niters = (nclocks + 32) / 64; // round the number of iterations
+        for(int i = 0; i < niters; i++) {
+            __builtin_amdgcn_s_sleep(64);
+        }
     }
+    __syncthreads();
 }
 
 int main(int argc, char **argv) try
 {
+    int devID = 0;
+    hipDeviceProp_t prop{};
+
+    CHK(hipSetDevice(devID));
+    CHK(hipGetDeviceProperties(&prop, devID));
+
+    // s_sleep causes a wave to sleep for (64 * SIMM16[6:0] + 1..64) clocks. The exact amount of delay is approximate. Compare with S_NOP
+
+    uint32_t sleep_ns = (argc > 1 ? atoi(argv[1]) : 2000*1000);
+    uint64_t nclocks = (uint64_t)((double)prop.clockRate / 64e6 * sleep_ns);
+
+    printf("device clock rate: %d; sleep_clocks: %lu\n", prop.clockRate, nclocks);
+
     hipEvent_t e_start, e_end;
     CHK(hipEventCreate(&e_start));
     CHK(hipEventCreate(&e_end));
 
-    uint32_t sleep_duration = (argc > 1 ? atoi(argv[1]) : 100);
-
-    fprintf(stderr, "Running with sleep duration: %d\n", sleep_duration);
+    printf("Running with sleep duration: %d ns\n", sleep_ns);
 
     void* kernel = reinterpret_cast<void*>(&sleep_kernel);
-    void* kernel_args[] = {&sleep_duration};
+    void* kernel_args[] = {&nclocks};
     dim3 gridDim = {1, 1, 1};
     dim3 blockDim = {512, 1, 1};
     BEGIN_TIMING(10)
-    hipLaunchKernel(kernel, gridDim, blockDim, kernel_args, 0, 0);
+    (void)hipLaunchKernel(kernel, gridDim, blockDim, kernel_args, 0, 0);
     END_TIMING(sleep kernel)
 
     return 0;
