@@ -2,7 +2,7 @@
 #include<stdio.h>
 #include<hip/hip_runtime.h>
 
-// hipcc -std=c++17 MeasureSleep.hip --offload-arch=gfx90a
+// hipcc -std=c++17 MeasureSleep.hip --offload-arch=gfx90a -o MeasureSleep.out
 
 #define CHK(x) \
    if(auto res = (x); res != hipSuccess) { \
@@ -28,10 +28,11 @@
     printf("%s time elapsed: %.3f us\n", #name, (ms*1e3)); \
     }   
   
-__global__ void sleep_kernel(uint32_t nclocks) 
+__global__ void sleep_kernel(uint32_t sleep_ns, uint32_t clock_rate) 
 {  
-    if(threadIdx.x == 0) {
-        uint32_t niters = (nclocks + 32) / 64; // round the number of iterations
+    if(threadIdx.x < warpSize) {
+        uint32_t nclocks = (uint32_t)((float)clock_rate / 64e6 * sleep_ns);
+        uint32_t niters = nclocks / 64; // round the number of iterations
         for(int i = 0; i < niters; i++) {
             __builtin_amdgcn_s_sleep(64);
         }
@@ -52,7 +53,8 @@ int main(int argc, char **argv) try
     uint32_t sleep_ns = (argc > 1 ? atoi(argv[1]) : 2000*1000);
     uint64_t nclocks = (uint64_t)((double)prop.clockRate / 64e6 * sleep_ns);
 
-    printf("device clock rate: %d; sleep_clocks: %lu\n", prop.clockRate, nclocks);
+    printf("Device name: %s; GCN arch: %s; clock rate: %d KHz; sleep_clocks: %lu\n", 
+        prop.name, prop.gcnArchName, prop.clockRate, nclocks);
 
     hipEvent_t e_start, e_end;
     CHK(hipEventCreate(&e_start));
@@ -61,7 +63,7 @@ int main(int argc, char **argv) try
     printf("Running with sleep duration: %d ns\n", sleep_ns);
 
     void* kernel = reinterpret_cast<void*>(&sleep_kernel);
-    void* kernel_args[] = {&nclocks};
+    void* kernel_args[] = {&sleep_ns, (uint32_t *)&prop.clockRate};
     dim3 gridDim = {1, 1, 1};
     dim3 blockDim = {512, 1, 1};
     BEGIN_TIMING(10)
