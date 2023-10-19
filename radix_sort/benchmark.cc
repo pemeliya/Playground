@@ -12,7 +12,7 @@
 
 #define CHK(x) \
    if(auto res = (x); res != hipSuccess) { \
-      throw std::runtime_error("Failed with " + std::to_string(res) + " at line: " + std::to_string(__LINE__)); \
+      throw std::runtime_error(#x " failed with code: " + std::to_string(res) + ": " + std::string(hipGetErrorString(res))); \
    }
 
 #define OUTZ(x) std::cerr << x << std::endl   
@@ -103,6 +103,11 @@ int main(int argc, char** argv) try
 
     // Initialize device
     CHK(DeviceInit())
+
+    int devID = 0;
+    CHK(hipGetDevice(&devID));
+    size_t freeX = 0, total = 0;
+    CHK(hipMemGetInfo(&freeX, &total));
 
     //benchmark_sort<float>();
     benchmark_sort<int16_t>("int16_t", num_items);

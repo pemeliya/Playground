@@ -71,10 +71,12 @@ int CoutCast(signed char val) { return val; }
             error = hipSetDevice(dev);
             if (error) break;
 
-            std::size_t device_free_physmem, device_total_physmem;
-            (void)hipMemGetInfo(&device_free_physmem, &device_total_physmem);
+            std::size_t device_free_physmem = 0, device_total_physmem = 0;
+            auto res = hipMemGetInfo(&device_free_physmem, &device_total_physmem);
+            fprintf(stderr, "hipMemGetInfo code: %d; device_free_physmem: %zu; "
+                 "device_total_physmem: %zu\n", res, device_free_physmem, device_total_physmem);
 
-            hipDeviceProp_t             deviceProp;
+            hipDeviceProp_t deviceProp;
 
             error = hipGetDeviceProperties(&deviceProp, dev);
             if (error) break;
