@@ -26,10 +26,10 @@ void* GetTopKKernelForK(int n);
 
 template <typename T>
 void* GetKernel(int n, int k) {
-  if (k <= 1) return GetTopKKernelForK<T, 1>(n);
-  if (k <= 2) return GetTopKKernelForK<T, 2>(n);
-  if (k <= 4) return GetTopKKernelForK<T, 4>(n);
-  if (k <= 8) return GetTopKKernelForK<T, 8>(n);
+  // if (k <= 1) return GetTopKKernelForK<T, 1>(n);
+  // if (k <= 2) return GetTopKKernelForK<T, 2>(n);
+  // if (k <= 4) return GetTopKKernelForK<T, 4>(n);
+  // if (k <= 8) return GetTopKKernelForK<T, 8>(n);
   if (k <= 16) return GetTopKKernelForK<T, 16>(n);
   return nullptr;
 }

@@ -58,7 +58,7 @@ void TypedTopK(TopkArgs<T> args)
   CU_BEGIN_TIMING(5)
   cudaLaunchKernel(kernel, blocks_per_grid, num_threads, kernel_args,
                        shmem_size, 0);
-  CU_END_TIMING("TopK N = %u; K = %u; batch_size: %u", 
+  CU_END_TIMING("TopK N = %zu; K = %zu; batch_size: %zu", 
       args.num_elements, args.k, args.batch_size);
 
   CHK(cudaPeekAtLastError());
@@ -107,8 +107,10 @@ int main() try {
   //size_t batch_size, size_t N, size_t K
   for(size_t batch_size: {1, 10, 20, 100, 200, 1000}) {
     for(size_t N: {1024, 2048, 4096, 8192}) {
-      for(size_t K: {1, 2, 3, 4, 6, 8, 12, 16}) {
+      //for(size_t K: {1, 2, 3, 4, 6, 8, 12, 16}) {
+      for(size_t K: {16}) {  
         benchmark_topk< float >(batch_size, N, K);
+        break;
       }
     }
   }
@@ -117,21 +119,3 @@ int main() try {
 catch(std::exception& ex) {
   VLOG("Exception: " << ex.what());
 }
-
-// absl::Status RunTopk(GpuStreamHandle stream, PrimitiveType dtype, void* data,
-//                      size_t num_elements, void* top_elements,
-//                      uint32_t* top_indices, size_t k, size_t batch_size) {
-//   VLOG(2) << "TopK: " << primitive_util::LowercasePrimitiveTypeName(dtype)
-//           << ", n: " << num_elements << ", k: " << k << ", bs: " << batch_size;
-//   auto args = TopkArgs<void>(stream, dtype, data, num_elements, top_elements,
-//                              top_indices, k, batch_size);
-//   switch (dtype) {
-//     case PrimitiveType::F32:
-//       return TypedTopK(args.Convert<float>());
-//     case PrimitiveType::BF16:
-//       return TypedTopK(args.Convert<Eigen::bfloat16>());
-//     default:
-//       return absl::UnimplementedError("GpuTopK not implemented for this dtype");
-//   }
-// }
-
