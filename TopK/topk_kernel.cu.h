@@ -13,7 +13,7 @@
 #include <cstdint>
 #include <limits>
 
-template <size_t K, typename KT, typename VT>
+template <size_t WarpSize, size_t K, typename KT, typename VT>
 struct TopK {
   
   struct KVT {
@@ -54,27 +54,27 @@ __device__ __forceinline__ uint32_t Idx(uint32_t i) {
       Push(tmp, kv);
     }
 
-    Reduce(tmp, 32);
+    Reduce(tmp, WarpSize);
 
-    if (threadIdx.x % 32 != 0) return;
-    int warp_id = threadIdx.x / 32;
+    if (threadIdx.x % WarpSize != 0) return;
+    int warp_id = threadIdx.x / WarpSize;
     for (int i = 0; i < K; i++) {
-      buffer_[i * 32 + warp_id] = tmp[i];
+      buffer_[i * WarpSize + warp_id] = tmp[i];
     }
   }
 
   // Merge the per-warp topks into a single topk. The final data is written to
   // `keys` and `idxs`
-  __device__ void MergeTopKs(KT* keys, uint32_t* idxs) {
+  __device__ void MergeTopKs(KT *keys, uint32_t *idxs) {
     KVT tmp[K];
     // We only use one warp for this step.
-    if (threadIdx.x / 32 != 0) return;
+    if (threadIdx.x >= WarpSize) return;
     __syncthreads();
 #pragma unroll
     for (int i = 0; i < K; i++) {
-      tmp[i] = buffer_[i * 32 + threadIdx.x];
+      tmp[i] = buffer_[i * WarpSize + threadIdx.x];
     }
-    Reduce(tmp, blockDim.x / 32);
+    Reduce(tmp, blockDim.x / WarpSize);
     if (threadIdx.x != 0) return;
     for (int i = 0; i < num_outputs_; ++i) {
       keys[i] = tmp[i].key;
@@ -86,7 +86,8 @@ __device__ __forceinline__ uint32_t Idx(uint32_t i) {
   // resulting array is stored in the tmp array of lane 0. For all other lanes,
   // `tmp` is unspecified after this function is called.
   __device__ __forceinline__ void Reduce(KVT tmp[K], int num_lanes) {
-    int lane_id = threadIdx.x % 32;
+    int lane_id = threadIdx.x % WarpSize;
+#pragma unroll    
     for (int offset = num_lanes / 2; offset > 0; offset /= 2) {
 #pragma unroll
       for (int i = 0; i < K; i++) {
@@ -116,7 +117,6 @@ __device__ __forceinline__ uint32_t Idx(uint32_t i) {
     return true;
   }
 
-  int source_ = 0;
   KVT* buffer_;
   int num_outputs_;
 };
@@ -126,11 +126,11 @@ __device__ __forceinline__ uint32_t Idx(uint32_t i) {
 // instantiations of Run() from the multiple monomorphizations of Run().
 extern __device__ __shared__ int shmem[];
 
-template <size_t K, typename KT, typename VT>
+template <size_t WarpSize, size_t K, typename KT, typename VT>
 __launch_bounds__(kTopKMaxThreadsPerBlock, 1) __global__
     void Run(KT* data, int n, KT* result, uint32_t* result_idxs, int k) 
 {
-  TopK<K, KT, VT> obj(shmem, k);
+  TopK<WarpSize, K, KT, VT> obj(shmem, k);
   
   auto in = data + n * blockIdx.x;
   auto vals_out = result + k * blockIdx.x;
@@ -145,9 +145,12 @@ template <typename T, size_t K>
 void* GetTopKKernelForK(int n) {
   // TODO(doak): Switch to uint32_t if we don't have an efficient
   // implemementation for uint16_t.
-  return //n < std::numeric_limits<uint16_t>::max()
-           //  ? reinterpret_cast<void*>(&Run<K, T, uint16_t>)
-             reinterpret_cast<void*>(&Run<K, T, uint32_t>);
+  return reinterpret_cast<void*>
+#if COMPILE_FOR_ROCM  // warp size is 64 for ROCM
+      (&Run<64, K, T, uint32_t>);
+#else
+      (&Run<32, K, T, uint32_t>);
+#endif
 }
 
 #endif  // TOPK_KERNEL_CU_H_
