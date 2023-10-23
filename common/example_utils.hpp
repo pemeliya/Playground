@@ -29,67 +29,38 @@
 
 #ifndef EXAMPLES_EXAMPLE_UTILS_HPP
 #define EXAMPLES_EXAMPLE_UTILS_HPP
+
 #include <vector>
-#include <sstream>
-#include <iostream>
-
-#include <hipcub/util_type.hpp>
-#include <hipcub/util_allocator.hpp>
-#include <hipcub/iterator/discard_output_iterator.hpp>
-
+#include <cmath>
+#include <memory.h>
+#include "common.h"
 #include "mersenne.h"
 
-#define AssertEquals(a, b) if ((a) != (b)) { std::cerr << "\n(" << __FILE__ << ": " << __LINE__ << ")\n"; exit(1);}
 
-template <typename T>
-T CoutCast(T val) { return val; }
+inline void DeviceInit(int dev = 0)
+{
+    int deviceCount;
+    CHK(cudaGetDeviceCount(&deviceCount));
 
-int CoutCast(char val) { return val; }
+    if (deviceCount == 0) {
+        throw std::runtime_error("No devices supporting CUDA/HIP");
+    }
 
-int CoutCast(unsigned char val) { return val; }
+    CHK(cudaSetDevice(dev));
 
-int CoutCast(signed char val) { return val; }
+    std::size_t device_free_physmem = 0, device_total_physmem = 0;
+    CHK(cudaMemGetInfo(&device_free_physmem, &device_total_physmem));
 
-  /**
-     * Initialize device
-     */
-    hipError_t DeviceInit(int dev = 0)
+    cudaDeviceProp deviceProp;
+
+    CHK(cudaGetDeviceProperties(&deviceProp, dev));
+    if (deviceProp.major < 1) {
+        throw std::runtime_error("Device does not support CUDA/HIP");
+    }
+
+    auto device_giga_bandwidth = float(deviceProp.memoryBusWidth) * deviceProp.memoryClockRate * 2 / 8 / 1000 / 1000;
     {
-        hipError_t error = hipSuccess;
-
-        do
-        {
-            int deviceCount;
-            error = hipGetDeviceCount(&deviceCount);
-            if (error) break;
-
-            if (deviceCount == 0) {
-                fprintf(stderr, "No devices supporting CUDA.\n");
-                exit(1);
-            }
-
-            error = hipSetDevice(dev);
-            if (error) break;
-
-            std::size_t device_free_physmem = 0, device_total_physmem = 0;
-            auto res = hipMemGetInfo(&device_free_physmem, &device_total_physmem);
-            fprintf(stderr, "hipMemGetInfo code: %d; device_free_physmem: %zu; "
-                 "device_total_physmem: %zu\n", res, device_free_physmem, device_total_physmem);
-
-            hipDeviceProp_t deviceProp;
-
-            error = hipGetDeviceProperties(&deviceProp, dev);
-            if (error) break;
-
-            if (deviceProp.major < 1) {
-                fprintf(stderr, "Device does not support Hip.\n");
-                exit(1);
-            }
-
-            auto device_giga_bandwidth = float(deviceProp.memoryBusWidth) * deviceProp.memoryClockRate * 2 / 8 / 1000 / 1000;
-            {
-                printf(
-                        "Using device %d: %s ( SM%d, %d SMs, "
+        printf("Using device %d: %s ( SM%d, %d SMs, "
                         "%lld free / %lld total MB physmem, "
                         "%.3f GB/s @ %d kHz mem clock, ECC %s)\n",
                     dev,
@@ -101,53 +72,63 @@ int CoutCast(signed char val) { return val; }
                     device_giga_bandwidth,
                     deviceProp.memoryClockRate,
                     (deviceProp.ECCEnabled) ? "on" : "off");
-                fflush(stdout);
-            }
-
-        } while (0);
-
-        return error;
+        fflush(stdout);
     }
+}
 
-/******************************************************************************
- * Helper routines for list comparison and display
- ******************************************************************************/
-
-struct GpuTimer
+class GpuTimer
 {
-    hipEvent_t start;
-    hipEvent_t stop;
-
+    cudaEvent_t start;
+    cudaEvent_t stop;
+public:
     GpuTimer()
     {
-        (void)hipEventCreate(&start);
-        (void)hipEventCreate(&stop);
+        (void)cudaEventCreate(&start);
+        (void)cudaEventCreate(&stop);
     }
 
     ~GpuTimer()
     {
-        (void)hipEventDestroy(start);
-        (void)hipEventDestroy(stop);
+        (void)cudaEventDestroy(start);
+        (void)cudaEventDestroy(stop);
     }
 
     void Start()
     {
-        (void)hipEventRecord(start, 0);
+        (void)cudaEventRecord(start, 0);
     }
 
     void Stop()
     {
-        (void)hipEventRecord(stop, 0);
+        (void)cudaEventRecord(stop, 0);
     }
 
     float ElapsedMillis()
     {
         float elapsed;
-        (void)hipEventSynchronize(stop);
-        (void)hipEventElapsedTime(&elapsed, start, stop);
+        (void)cudaEventSynchronize(stop);
+        (void)cudaEventElapsedTime(&elapsed, start, stop);
         return elapsed;
     }
 };
+
+#define CU_BEGIN_TIMING(N_ITERS) { \
+    cudaDeviceSynchronize();       \
+    GpuTimer timer;                 \
+    uint32_t nIters = N_ITERS;       \
+    for(unsigned i = 0; i < nIters + 1; i++) {
+
+#define CU_END_TIMING(fmt, ...)           \
+        if(i == 0) {                    \
+            cudaDeviceSynchronize();    \
+            timer.Start();              \
+        }                               \
+    }                                   \
+    timer.Stop();                       \
+    float ms = timer.ElapsedMillis();                  \
+    if(nIters > 0) ms /= nIters;                        \
+    fprintf(stderr, fmt "; time elapsed: %.3f ms\n", ##__VA_ARGS__, ms); \
+    }
 
 template <typename K>
 void RandomBits(
@@ -163,8 +144,8 @@ void RandomBits(
     unsigned int word_buff[NUM_WORDS];
 
     if (entropy_reduction == -1)
-    {
-        memset((void *) &key, 0, sizeof(key));
+    {   
+        key = {};
         return;
     }
 
