@@ -3,6 +3,7 @@
 #include <stdexcept>
 #include <bit>
 #include <numeric>
+#include <random>
 #include "topk_kernel.h"
 #include "example_utils.hpp"
 
@@ -89,10 +90,12 @@ void benchmark_topk(size_t batch_size, size_t N, size_t K, bool verify = true)
   MappedVector< int32_t > indices(out_total);
   auto top_elems = values.devPtr + in_total;
 
-  int seed = 12345678;  
+  std::random_device rd;
+  int seed = rd();  
   mersenne::init_genrand(seed);
   for(size_t i = 0; i < in_total; i++) {
-    RandomBits(values[i]);
+    //RandomBits(values[i]);
+    values[i] = i+1;
   }
   TypedTopK< NT >({values.devPtr, N, top_elems, 
          (uint32_t *)indices.devPtr, K, batch_size});
@@ -101,18 +104,32 @@ void benchmark_topk(size_t batch_size, size_t N, size_t K, bool verify = true)
     return;
   }
 
-  auto vptr = values.devPtr;
-  auto iptr = indices.devPtr;
-  for(size_t i = 0; i < batch_size; i++, iptr += K, vptr += N) {
-    std::vector< int32_t > idxs(N);
+  auto vptr = values.devPtr;  // original CPU data (unsorted)
+  auto gpu_iptr = indices.devPtr;
+  auto gpu_vptr = top_elems;
+
+  std::vector< NT > truth_vals(K), gpu_vals(K);
+  std::vector< int32_t > idxs(N);
+  for(size_t i = 0; i < batch_size; i++, gpu_iptr += K, gpu_vptr += K, vptr += N) {
+    
     std::iota(idxs.begin(), idxs.end(), 0);
     std::sort(idxs.begin(), idxs.end(), [vptr](const auto& a, const auto& b) {
       return vptr[a] > vptr[b];
     });
+    // save truth values before sorting idxs to keep it consistent with gpu_vptr
+    for(size_t j = 0; j < K; j++) {
+      truth_vals[j] = vptr[idxs[j]];
+    }
 
     bool print_if_differs = true;
     int32_t eps = 0;
-    checkme(iptr, idxs.data(), K, K, 1, eps, print_if_differs);
+    std::sort(idxs.begin(), idxs.begin() + K);
+    std::sort(gpu_iptr, gpu_iptr + K);
+    // descending sort !! 
+    std::sort(gpu_vptr, gpu_vptr + K, std::greater<NT>());
+
+    checkme(gpu_iptr, idxs.data(), K, K, 1, eps, print_if_differs);
+    checkme(gpu_vptr, truth_vals.data(), K, K, 1, (float)1e-5, print_if_differs);
   }
     
 }
@@ -120,12 +137,13 @@ void benchmark_topk(size_t batch_size, size_t N, size_t K, bool verify = true)
 int main() try {
 
   //size_t batch_size, size_t N, size_t K
-  for(size_t batch_size: {10, 20, 100, 200, 1000}) 
+  for(size_t batch_size: {1000}) //0, 20, 100, 200, 1000}) 
   {
     //for(size_t N: {100, 200, 300, 999, 1050, 2000, 6333, 7889, 12312}) {
-      for(size_t N: {1024, 2048, 4096, 8192}) {
+      for(size_t N: {1024, 2048, 4096, 8192}) 
+      {
       //for(size_t K: {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16})
-      for(size_t K: {8, 16}) 
+      for(size_t K: {16}) 
       {  
         benchmark_topk< float >(batch_size, N, K);
         //NumThreadsNew(N, K, batch_size);

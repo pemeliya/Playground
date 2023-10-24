@@ -42,6 +42,7 @@ __device__ __forceinline__ uint32_t Idx(uint32_t i) {
         tmp[i] = {key[Idx(i)], Idx(i)};
     }
     for (int i = 0; i < K; i++) {
+#pragma unroll          
       for (int j = i + 1; j < K; j++) {
         KVT ti = tmp[i];
         KVT tj = tmp[j];
@@ -89,7 +90,6 @@ __device__ __forceinline__ uint32_t Idx(uint32_t i) {
   // `tmp` is unspecified after this function is called.
   __device__ __forceinline__ void Reduce(KVT tmp[K], int num_lanes) {
     int lane_id = threadIdx.x % WarpSize;
-#pragma unroll    
     for (int offset = num_lanes / 2; offset > 0; offset /= 2) {
 #pragma unroll
       for (int i = 0; i < K; i++) {
@@ -136,7 +136,10 @@ __device__ void topk_kernel_main(KT* data, int n, KT* result, uint32_t* result_i
   auto in = data + n * blockIdx.x;
   auto vals_out = result + k * blockIdx.x;
   auto idxs_out = result_idxs + k * blockIdx.x;
-  int slice_size = (n + blockDim.x-1) / blockDim.x;
+  int slice_size = n / blockDim.x;
+  if (threadIdx.x < n % blockDim.x) {
+    slice_size++;
+  }
   
   obj.PerWarpTopK(in, slice_size);
   obj.MergeTopKs(vals_out, idxs_out);
