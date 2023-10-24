@@ -22,15 +22,15 @@ limitations under the License.
 constexpr size_t kTopKMaxThreadsPerBlock = 1024;
 
 template <typename T, size_t K>
-void* GetTopKKernelForK(int n);
+void* GetTopKKernelForK(size_t n_threads);
 
 template <typename T>
-void* GetKernel(int n, int k) {
-  // if (k <= 1) return GetTopKKernelForK<T, 1>(n);
-  // if (k <= 2) return GetTopKKernelForK<T, 2>(n);
-  // if (k <= 4) return GetTopKKernelForK<T, 4>(n);
-  // if (k <= 8) return GetTopKKernelForK<T, 8>(n);
-  if (k <= 16) return GetTopKKernelForK<T, 16>(n);
+void* GetKernel(size_t n_threads, size_t k) {
+  if (k <= 1) return GetTopKKernelForK<T, 1>(n_threads);
+  if (k <= 2) return GetTopKKernelForK<T, 2>(n_threads);
+  if (k <= 4) return GetTopKKernelForK<T, 4>(n_threads);
+  if (k <= 8) return GetTopKKernelForK<T, 8>(n_threads);
+  if (k <= 16) return GetTopKKernelForK<T, 16>(n_threads);
   return nullptr;
 }
 

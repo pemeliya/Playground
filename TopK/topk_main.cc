@@ -18,6 +18,21 @@ size_t NumThreads(size_t n, size_t k, size_t batch_size) {
   return std::min(threads_per_block, min_slice);
 }
 
+size_t NumThreadsNew(size_t n, size_t k, size_t batch_size) 
+{
+  size_t warp_size = COMPILE_FOR_ROCM ? 64 : 32;
+  size_t n_threads = (n / k), n_threads_warp = 
+        ((n_threads + warp_size - 1) / warp_size) * warp_size;
+
+  // for large k, reduce maximal block size to reduce register pressure
+  size_t max_threads = (k > 8 ? 512 : 1024);
+  n_threads_warp = std::min(n_threads_warp, max_threads);
+  
+  VLOG("n: " << n << "; k: " << k << " n_threads: " << n_threads 
+      << "; n_threads_warp: " << n_threads_warp);
+  return 0;
+}
+
 // Helper type for converting the untyped arguments of RunTopk to TypedTopk
 template <typename T>
 struct TopkArgs {
@@ -39,7 +54,7 @@ void TypedTopK(TopkArgs<T> args)
         "TopkSpecializer.");
   }
 
-  void* kernel = GetKernel<T>(args.num_elements, args.k);
+  void* kernel = GetKernel<T>(num_threads, args.k);
 
   int blocks_per_grid = args.batch_size;
   constexpr size_t max_kv_size = sizeof(uint64_t);
@@ -105,12 +120,15 @@ void benchmark_topk(size_t batch_size, size_t N, size_t K, bool verify = true)
 int main() try {
 
   //size_t batch_size, size_t N, size_t K
-  for(size_t batch_size: {1, 10, 20, 100, 200, 1000}) {
-    for(size_t N: {1024, 2048, 4096, 8192}) {
-      //for(size_t K: {1, 2, 3, 4, 6, 8, 12, 16}) {
-      for(size_t K: {16}) {  
+  for(size_t batch_size: {10, 20, 100, 200, 1000}) 
+  {
+    //for(size_t N: {100, 200, 300, 999, 1050, 2000, 6333, 7889, 12312}) {
+      for(size_t N: {1024, 2048, 4096, 8192}) {
+      //for(size_t K: {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16})
+      for(size_t K: {8, 16}) 
+      {  
         benchmark_topk< float >(batch_size, N, K);
-        break;
+        //NumThreadsNew(N, K, batch_size);
       }
     }
   }

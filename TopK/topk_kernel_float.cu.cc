@@ -16,8 +16,8 @@ limitations under the License.
 #include "topk_kernel.cu.h"
 
 
-// template void* GetTopKKernelForK<float, 1>(int n);
-// template void* GetTopKKernelForK<float, 2>(int n);
-// template void* GetTopKKernelForK<float, 4>(int n);
-// template void* GetTopKKernelForK<float, 8>(int n);
-template void* GetTopKKernelForK<float, 16>(int n);
+template void* GetTopKKernelForK<float, 1>(size_t n_threads);
+template void* GetTopKKernelForK<float, 2>(size_t n_threads);
+template void* GetTopKKernelForK<float, 4>(size_t n_threads);
+template void* GetTopKKernelForK<float, 8>(size_t n_threads);
+template void* GetTopKKernelForK<float, 16>(size_t n_threads);

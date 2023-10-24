@@ -13,6 +13,8 @@
 #include <cstdint>
 #include <limits>
 
+// bitonic TopK: https://github.com/anilshanbhag/gpu-topk
+
 template <size_t WarpSize, size_t K, typename KT, typename VT>
 struct TopK {
   
@@ -35,10 +37,10 @@ __device__ __forceinline__ uint32_t Idx(uint32_t i) {
 
     KVT tmp[K];
     // TODO(doak): Use bitonic sort.
+#pragma unroll    
     for (int i = 0; i < K; i++) {
         tmp[i] = {key[Idx(i)], Idx(i)};
     }
-
     for (int i = 0; i < K; i++) {
       for (int j = i + 1; j < K; j++) {
         KVT ti = tmp[i];
@@ -127,8 +129,7 @@ __device__ __forceinline__ uint32_t Idx(uint32_t i) {
 extern __device__ __shared__ int shmem[];
 
 template <size_t WarpSize, size_t K, typename KT, typename VT>
-__launch_bounds__(kTopKMaxThreadsPerBlock, 1) __global__
-    void Run(KT* data, int n, KT* result, uint32_t* result_idxs, int k) 
+__device__ void topk_kernel_main(KT* data, int n, KT* result, uint32_t* result_idxs, int k) 
 {
   TopK<WarpSize, K, KT, VT> obj(shmem, k);
   
@@ -141,15 +142,28 @@ __launch_bounds__(kTopKMaxThreadsPerBlock, 1) __global__
   obj.MergeTopKs(vals_out, idxs_out);
 }
 
+template <size_t WarpSize, size_t K, typename KT, typename VT>
+__launch_bounds__(512, 1) __global__
+    void Run512(KT* data, int n, KT* result, uint32_t* result_idxs, int k) 
+{
+  topk_kernel_main< WarpSize, K, KT, VT >(data, n, result, result_idxs, k);
+}
+
+template <size_t WarpSize, size_t K, typename KT, typename VT>
+__launch_bounds__(1024, 1) __global__
+    void Run1024(KT* data, int n, KT* result, uint32_t* result_idxs, int k) 
+{
+  topk_kernel_main< WarpSize, K, KT, VT >(data, n, result, result_idxs, k);
+}
+
 template <typename T, size_t K>
-void* GetTopKKernelForK(int n) {
-  // TODO(doak): Switch to uint32_t if we don't have an efficient
-  // implemementation for uint16_t.
+void* GetTopKKernelForK(size_t n_threads) {
+  
   return reinterpret_cast<void*>
 #if COMPILE_FOR_ROCM  // warp size is 64 for ROCM
-      (&Run<64, K, T, uint32_t>);
+      (n_threads <= 512 ? &Run512<64, K, T, uint32_t> : &Run1024<64, K, T, uint32_t>);
 #else
-      (&Run<32, K, T, uint32_t>);
+      (n_threads <= 512 ? &Run512<32, K, T, uint32_t> : &Run1024<32, K, T, uint32_t>);
 #endif
 }
 
