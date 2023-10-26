@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <iostream>
 #include <limits>
+#include <vector>
 
 #if COMPILE_FOR_ROCM
 #include<hip/hip_runtime.h>
@@ -12,8 +13,8 @@
 #define cudaMalloc hipMalloc
 #define cudaFree hipFree
 #define cudaMemcpy hipMemcpy
-#define cudaHostMalloc hipHostMalloc
-#define cudaHostFree hipHostFree
+#define cudaHostAlloc hipHostMalloc
+#define cudaFreeHost hipHostFree
 #define cudaMemcpyHostToDevice hipMemcpyHostToDevice
 #define cudaMemcpyDeviceToHost hipMemcpyDeviceToHost
 #define cudaSuccess hipSuccess
@@ -62,19 +63,11 @@ constexpr uint32_t bit_floor(uint32_t n)
     return (1u << (shift & (k - 1u))) & n;
 }
 
-template <class _Tp>
-constexpr _Tp bit_ceil(_Tp __t) noexcept {
-  if (__t < 2)
+constexpr uint32_t bit_ceil(uint32_t n) {
+  if (n < 2)
     return 1;
-  const unsigned __n = std::numeric_limits<_Tp>::digits - std::__countl_zero((_Tp)(__t - 1u));
-
-  if constexpr (sizeof(_Tp) >= sizeof(unsigned))
-    return _Tp{1} << __n;
-  else {
-    const unsigned __extra = std::numeric_limits<unsigned>::digits - std::numeric_limits<_Tp>::digits;
-    const unsigned __ret_val = 1u << (__n + __extra);
-    return (_Tp)(__ret_val >> __extra);
-  }
+  const unsigned __n = std::numeric_limits<uint32_t>::digits - __builtin_clz(n - 1u);
+  return 1u << __n;
 }
 
 } // namespace std
@@ -108,8 +101,8 @@ struct HVector : std::vector< NT > {
 template< class NT >
 struct MappedVector {
 
-   MappedVector(size_t N_) : N(N_) {
-       CHK(cudaHostMalloc((void**)&devPtr, N*sizeof(NT)))
+   MappedVector(size_t N_, int flags = 0) : N(N_) {
+       CHK(cudaHostAlloc((void**)&devPtr, N*sizeof(NT), flags))
    }
    void copyHToD() {
    }
@@ -120,7 +113,7 @@ struct MappedVector {
       return devPtr[i];
    }
    ~MappedVector() {
-      (void)cudaHostFree(devPtr);
+      (void)cudaFreeHost(devPtr);
    }
    size_t N;
    NT *devPtr;

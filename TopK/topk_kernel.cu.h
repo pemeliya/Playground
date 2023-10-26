@@ -150,7 +150,7 @@ __device__ void topk_kernel_main(KT* data, int n, KT* result, uint32_t* result_i
   if (threadIdx.x < n % blockDim.x) {
     slice_size++;
   }
-  
+ 
   obj.PerWarpTopK(in, slice_size);
   obj.MergeTopKs(vals_out, idxs_out);
 }

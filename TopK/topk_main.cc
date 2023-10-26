@@ -7,18 +7,6 @@
 #include "topk_kernel.h"
 #include "common/example_utils.hpp"
 
-size_t NumThreads(size_t n, size_t k, size_t batch_size) {
-  // Estimate number of threads per block that can run concurrently given the
-  // register footprint.
-  size_t simultaneous_threads_per_block = 512 * (16 / k);
-  size_t threads_per_block =
-      std::min(simultaneous_threads_per_block, kTopKMaxThreadsPerBlock);
-  // Minimum amount of data that each thread needs to receive for the algorithm.
-  size_t min_slice = std::bit_floor(n / std::bit_ceil(k));
-  //VLOG("threads_per_block, min_slice: " << threads_per_block << ',' << min_slice);
-  return std::min(threads_per_block, min_slice);
-}
-
 size_t NumThreadsNew(size_t n, size_t k, size_t batch_size) 
 {
   size_t warp_size = COMPILE_FOR_ROCM ? 64 : 32;
@@ -32,6 +20,17 @@ size_t NumThreadsNew(size_t n, size_t k, size_t batch_size)
   VLOG("n: " << n << "; k: " << k << " n_threads: " << n_threads 
       << "; n_threads_warp: " << n_threads_warp);
   return 0;
+}
+
+size_t NumThreads(size_t n, size_t k, size_t batch_size) {
+  // Estimate number of threads per block that can run concurrently given the
+  // register footprint.
+  size_t threads_per_block =
+      std::min(512 * (16 / k), kTopKMaxThreadsPerBlock);
+  // Minimum amount of data that each thread needs to receive for the algorithm.
+  size_t min_slice = std::bit_floor(n / std::bit_ceil(k));
+  //VLOG("threads_per_block, min_slice: " << threads_per_block << ',' << min_slice << " ceil: " << xbit_ceil(k));
+  return std::min(threads_per_block, min_slice);
 }
 
 // Helper type for converting the untyped arguments of RunTopk to TypedTopk
@@ -62,10 +61,10 @@ void TypedTopK(TopkArgs<T> args)
   // Allocate shmem assuming we have a full reduction.
   int shmem_size = std::bit_ceil(args.k) * max_kv_size * 64;
   int slice_size = (args.num_elements + num_threads-1) / num_threads;
-  // VLOG("Testing N = " << args.num_elements << "; K = " << args.k <<
-  //         "; batch_size: " << args.batch_size << 
-  //         "; n_blocks: " << blocks_per_grid << "; shmem_size: " << shmem_size
-  //       << " num_threads: " << num_threads << " slice_size: " << slice_size);
+  VLOG("Testing N = " << args.num_elements << "; K = " << args.k <<
+          "; batch_size: " << args.batch_size << 
+          "; n_blocks: " << blocks_per_grid << "; shmem_size: " << shmem_size
+        << " num_threads: " << num_threads << " slice_size: " << slice_size);
 
   void* kernel_args[] = {&args.data, &args.num_elements, &args.top_elements,
                          &args.top_indices, &args.k};
@@ -138,7 +137,7 @@ int main() try
 {
   DeviceInit();
   //size_t batch_size, size_t N, size_t K
-  for(size_t batch_size: {0, 20, 100, 200, 1000}) 
+  for(size_t batch_size: {10, 20, 100, 200, 1000}) 
   {
     for(size_t N: {100, 200, 300, 999, 1050, 2000, 6333, 7889, 12312})
     //for(size_t N: {1024, 2048, 4096, 8192}) 

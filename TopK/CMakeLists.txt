@@ -7,7 +7,7 @@ cmake_minimum_required(VERSION 3.12)
 
 project(topk)
 
-set(COMPILE_FOR_ROCM 1)
+set(COMPILE_FOR_ROCM 0)
 
 set(CMAKE_VERBOSE_MAKEFILE ON)
 set(CMAKE_CXX_STANDARD 20)
@@ -28,7 +28,13 @@ if(NOT ${COMPILE_FOR_ROCM})
     #set(CUDA_NVCC_FLAGS "--ptxas-options;--maxrregcount=128;")
     set(CUDA_NVCC_FLAGS "--ptxas-options;-v;-keep")
 
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -std=c++17 --ptxas-options=-v -arch=compute_70 -code=sm_70")
+    set(CMAKE_CUDA_COMPILER ${CMAKE_CXX_COMPILER})
+    message(STATUS "----------- compiler: ${CMAKE_CXX_COMPILER} -- ${CMAKE_CUDA_COMPILER}")
+    
+    # NVCC line
+    #set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -std=c++17 --ptxas-options=-v -arch=compute_70 -code=sm_70")
+    # CLANG line
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -std=c++17 -Xcuda-ptxas -v --cuda-gpu-arch=sm_70")
     set_source_files_properties(${GPU_SRC} PROPERTIES LANGUAGE CUDA)
 else()
     #list(APPEND CMAKE_PREFIX_PATH "/opt/rocm-5.6.0/lib/cmake/AMDDeviceLibs")
