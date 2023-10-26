@@ -33,8 +33,8 @@
 #include <vector>
 #include <cmath>
 #include <memory.h>
-#include "common.h"
-#include "mersenne.h"
+#include "common/common.h"
+#include "common/mersenne.h"
 
 
 inline void DeviceInit(int dev = 0)
@@ -113,14 +113,14 @@ public:
 };
 
 #define CU_BEGIN_TIMING(N_ITERS) { \
-    cudaDeviceSynchronize();       \
+    (void)cudaDeviceSynchronize();       \
     GpuTimer timer;                 \
     uint32_t nIters = N_ITERS;       \
     for(unsigned i = 0; i < nIters + 1; i++) {
 
 #define CU_END_TIMING(fmt, ...)           \
         if(i == 0) {                    \
-            cudaDeviceSynchronize();    \
+            (void)cudaDeviceSynchronize();    \
             timer.Start();              \
         }                               \
     }                                   \

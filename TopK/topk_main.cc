@@ -5,7 +5,7 @@
 #include <numeric>
 #include <random>
 #include "topk_kernel.h"
-#include "example_utils.hpp"
+#include "common/example_utils.hpp"
 
 size_t NumThreads(size_t n, size_t k, size_t batch_size) {
   // Estimate number of threads per block that can run concurrently given the
@@ -60,8 +60,7 @@ void TypedTopK(TopkArgs<T> args)
   int blocks_per_grid = args.batch_size;
   constexpr size_t max_kv_size = sizeof(uint64_t);
   // Allocate shmem assuming we have a full reduction.
-  int shmem_size = std::bit_ceil(args.k) * max_kv_size * 32;
-
+  int shmem_size = std::bit_ceil(args.k) * max_kv_size * 64;
   int slice_size = (args.num_elements + num_threads-1) / num_threads;
   // VLOG("Testing N = " << args.num_elements << "; K = " << args.k <<
   //         "; batch_size: " << args.batch_size << 
@@ -78,7 +77,7 @@ void TypedTopK(TopkArgs<T> args)
       args.num_elements, args.k, args.batch_size);
 
   CHK(cudaPeekAtLastError());
-  cudaDeviceSynchronize();                       
+  (void)cudaDeviceSynchronize();                       
 }
 
 template < class NT >
@@ -129,28 +128,27 @@ void benchmark_topk(size_t batch_size, size_t N, size_t K, bool verify = true)
     std::sort(gpu_vptr, gpu_vptr + K, std::greater<NT>());
 
     checkme(gpu_iptr, idxs.data(), K, K, 1, eps, print_if_differs);
+    //VLOG("------------------------------------------------------")
     checkme(gpu_vptr, truth_vals.data(), K, K, 1, (float)1e-5, print_if_differs);
   }
     
 }
 
-int main() try {
-
+int main() try 
+{
+  DeviceInit();
   //size_t batch_size, size_t N, size_t K
-  for(size_t batch_size: {1000}) //0, 20, 100, 200, 1000}) 
+  for(size_t batch_size: {0, 20, 100, 200, 1000}) 
   {
-    //for(size_t N: {100, 200, 300, 999, 1050, 2000, 6333, 7889, 12312}) {
-      for(size_t N: {1024, 2048, 4096, 8192}) 
-      {
-      //for(size_t K: {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16})
-      for(size_t K: {16}) 
+    for(size_t N: {100, 200, 300, 999, 1050, 2000, 6333, 7889, 12312})
+    //for(size_t N: {1024, 2048, 4096, 8192}) 
+    {
+      for(size_t K: {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16})
       {  
         benchmark_topk< float >(batch_size, N, K);
-        //NumThreadsNew(N, K, batch_size);
       }
     }
   }
-
 }
 catch(std::exception& ex) {
   VLOG("Exception: " << ex.what());

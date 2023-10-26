@@ -12,14 +12,15 @@
 #define cudaMalloc hipMalloc
 #define cudaFree hipFree
 #define cudaMemcpy hipMemcpy
-#define cudaMallocHost hipMallocHost
-#define cudaFreeHost hipFreeHost
+#define cudaHostMalloc hipHostMalloc
+#define cudaHostFree hipHostFree
 #define cudaMemcpyHostToDevice hipMemcpyHostToDevice
 #define cudaMemcpyDeviceToHost hipMemcpyDeviceToHost
 #define cudaSuccess hipSuccess
 #define cudaGetLastError hipGetLastError
 #define cudaGetErrorName hipGetErrorName
 #define cudaGetErrorString hipGetErrorString
+#define cudaPeekAtLastError hipPeekAtLastError
 #define cudaGetDeviceCount hipGetDeviceCount
 #define cudaSetDevice hipSetDevice
 #define cudaMemGetInfo hipMemGetInfo
@@ -32,13 +33,15 @@
 #define cudaEventSynchronize hipEventSynchronize
 #define cudaDeviceSynchronize hipDeviceSynchronize
 #define cudaEventElapsedTime hipEventElapsedTime
-
+#define cudaLaunchKernel hipLaunchKernel
+#define FORCEINLINE 
 // #include <hipcub/util_type.hpp>
 // #include <hipcub/util_allocator.hpp>
 // #include <hipcub/iterator/discard_output_iterator.hpp>
 
 #else
 #include <cuda_runtime_api.h>
+#define FORCEINLINE __forceinline__
 #endif
 
 #define CHK(x) \
@@ -106,7 +109,7 @@ template< class NT >
 struct MappedVector {
 
    MappedVector(size_t N_) : N(N_) {
-       CHK(cudaMallocHost((void**)&devPtr, N*sizeof(NT)))
+       CHK(cudaHostMalloc((void**)&devPtr, N*sizeof(NT)))
    }
    void copyHToD() {
    }
@@ -117,7 +120,7 @@ struct MappedVector {
       return devPtr[i];
    }
    ~MappedVector() {
-      (void)cudaFreeHost(devPtr);
+      (void)cudaHostFree(devPtr);
    }
    size_t N;
    NT *devPtr;

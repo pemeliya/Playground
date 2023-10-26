@@ -13,6 +13,17 @@
 #include <cstdint>
 #include <limits>
 
+#if COMPILE_FOR_ROCM  // warp size is 64 for ROCM
+#ifndef __AMDGCN_WAVEFRONT_SIZE
+#error Wavefront size is not defined! Please use HIPCC compiler!
+#else
+#define WAVEFRONT_SIZE __AMDGCN_WAVEFRONT_SIZE
+#endif
+#else // NVIDIA
+#define WAVEFRONT_SIZE 32 
+#endif
+
+
 // bitonic TopK: https://github.com/anilshanbhag/gpu-topk
 
 template <size_t WarpSize, size_t K, typename KT, typename VT>
@@ -41,8 +52,8 @@ __device__ __forceinline__ uint32_t Idx(uint32_t i) {
     for (int i = 0; i < K; i++) {
         tmp[i] = {key[Idx(i)], Idx(i)};
     }
+#pragma unroll    
     for (int i = 0; i < K; i++) {
-#pragma unroll          
       for (int j = i + 1; j < K; j++) {
         KVT ti = tmp[i];
         KVT tj = tmp[j];
@@ -56,7 +67,6 @@ __device__ __forceinline__ uint32_t Idx(uint32_t i) {
       KVT kv{key[Idx(idx)], Idx(idx)};
       Push(tmp, kv);
     }
-
     Reduce(tmp, WarpSize);
 
     if (threadIdx.x % WarpSize != 0) return;
@@ -109,7 +119,7 @@ __device__ __forceinline__ uint32_t Idx(uint32_t i) {
     if (tmp[K - 1] > kv) return false;
     tmp[K - 1] = kv; // (K-1)th is the smallest element out of K
 #pragma unroll
-    for (int i = K - 2; i >= 0; --i) {
+    for (int i = (int)K - 2; i >= 0; --i) {
       if (tmp[i] > kv) break;
       // Swap
       KVT t = tmp[i];
@@ -159,14 +169,48 @@ __launch_bounds__(1024, 1) __global__
   topk_kernel_main< WarpSize, K, KT, VT >(data, n, result, result_idxs, k);
 }
 
+template <size_t WarpSize, class NT, class LessOp >
+__device__ void bitonic_warp_sort(uint32_t lane, NT& d, LessOp op)
+{
+#pragma unroll  
+  for(int32_t i = 2; i < WarpSize; i *= 2) {
+    int32_t biti = (lane & i) == i; // // __builtin_amdgcn_ubfe ??
+#pragma unroll    
+    for(int32_t j = i / 2; j >= 1; j /= 2) {
+      int32_t bitj = (lane & j) == j;
+      auto xd = shflType< stXor >(d, j); 
+      if((biti ^ bitj ^ op(d, xd)) == 0) {
+        d = xd;
+      }
+    }
+    // after step i, we have bitonic sequences of size i*2
+    // i.e., after the whole loop we have a bitonic sequence of WarpSize
+    // if (bit1 == 0) { // sort min <-- max
+    //   d = (bit0 == 0) ? min(d, xd) : max(d, xd);
+    // } else { // sort max <-- min
+    //   d = (bit0 == 0) ? max(d, xd) : min(d, xd);
+    // }
+  }
+#pragma unroll  
+  for(int32_t i = WarpSize/2; i >= 1; i /= 2) {
+    int32_t biti = (lane & i) == i;
+    auto xd = shflType< stXor >(d, i); 
+    if((biti ^ op(d, xd)) == 0) {
+      d = xd;
+    }
+  }
+}
+
 template <typename T, size_t K>
 void* GetTopKKernelForK(size_t n_threads) {
-  
+
   return reinterpret_cast<void*>
-#if COMPILE_FOR_ROCM  // warp size is 64 for ROCM
+#if WAVEFRONT_SIZE == 64  
       (n_threads <= 512 ? &Run512<64, K, T, uint32_t> : &Run1024<64, K, T, uint32_t>);
-#else
+#elif WAVEFRONT_SIZE == 32  
       (n_threads <= 512 ? &Run512<32, K, T, uint32_t> : &Run1024<32, K, T, uint32_t>);
+#else      
+#error Undefined wavefront size !
 #endif
 }
 

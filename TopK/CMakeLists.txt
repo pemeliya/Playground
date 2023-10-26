@@ -7,7 +7,7 @@ cmake_minimum_required(VERSION 3.12)
 
 project(topk)
 
-set(COMPILE_FOR_ROCM 0)
+set(COMPILE_FOR_ROCM 1)
 
 set(CMAKE_VERBOSE_MAKEFILE ON)
 set(CMAKE_CXX_STANDARD 20)
@@ -30,15 +30,28 @@ if(NOT ${COMPILE_FOR_ROCM})
 
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -std=c++17 --ptxas-options=-v -arch=compute_70 -code=sm_70")
     set_source_files_properties(${GPU_SRC} PROPERTIES LANGUAGE CUDA)
+else()
+    #list(APPEND CMAKE_PREFIX_PATH "/opt/rocm-5.6.0/lib/cmake/AMDDeviceLibs")
+    #list(APPEND CMAKE_PREFIX_PATH "/opt/rocm-5.6.0/lib/cmake/amd_comgr")
+    list(APPEND CMAKE_MODULE_PATH "/opt/rocm-5.6.0/lib/cmake/hip") 
+    #to be added to hip-lang-config.cmake:
+    #find_dependency(AMDDeviceLibs REQUIRED PATHS "/opt/rocm-5.6.0/lib/cmake/AMDDeviceLibs")
+    #find_dependency(amd_comgr REQUIRED PATHS "/opt/rocm-5.6.0/lib/cmake/amd_comgr")
+
+    enable_language(HIP) 
+    find_package(HIP REQUIRED)
+    set_source_files_properties(${GPU_SRC} PROPERTIES LANGUAGE HIP)
+    set_source_files_properties(${SRC} PROPERTIES LANGUAGE HIP)
 endif()
 
+# get_cmake_property(_variableNames VARIABLES)
+# list (SORT _variableNames)
+# foreach (_variableName ${_variableNames})
+#    message(STATUS "${_variableName}=${${_variableName}}")
+# endforeach()
+
 #set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=gnu++20")
-include_directories("../common")
-
-#cuda_compile_cubin(CUBIN_FILES ${CU})
-#cuda_compile(CUDA_FILES ${CU})
-
-set_source_files_properties(TopK_main.cc PROPERTIES LANGUAGE CUDA)
+include_directories("..")
 
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -52,7 +65,7 @@ set(TARGET_BIN "$<TARGET_FILE_NAME:topk>")
 
 if(NOT ${COMPILE_FOR_ROCM})
 
-set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_ARCHITECTURES 70-real)
+    set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_ARCHITECTURES 70-real)
 
 # NOTEL: this only worls with 'cubin' not exe files
 #add_custom_command(TARGET ${PROJECT_NAME}
@@ -71,7 +84,7 @@ set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_ARCHITECTURES 70-real)
 #    WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
 #    COMMENT "=== running cuda-memcheck ==="
 #)
-target_link_libraries(${PROJECT_NAME} ${CUDA_CUDART_LIBRARY} ${CUDA_CUDA_LIBRARY})
+    target_link_libraries(${PROJECT_NAME} ${CUDA_CUDART_LIBRARY} ${CUDA_CUDA_LIBRARY})
 else()
-
+    set_property(TARGET ${PROJECT_NAME} PROPERTY HIP_ARCHITECTURES gfx90a)
 endif()
