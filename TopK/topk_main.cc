@@ -29,7 +29,7 @@ size_t NumThreads(size_t n, size_t k, size_t batch_size) {
       std::min(512 * (16 / k), kTopKMaxThreadsPerBlock);
   // Minimum amount of data that each thread needs to receive for the algorithm.
   size_t min_slice = std::bit_floor(n / std::bit_ceil(k));
-  //VLOG("threads_per_block, min_slice: " << threads_per_block << ',' << min_slice << " ceil: " << xbit_ceil(k));
+  VLOG("threads_per_block, min_slice: " << threads_per_block << ',' << min_slice);
   return std::min(threads_per_block, min_slice);
 }
 
@@ -53,13 +53,14 @@ void TypedTopK(TopkArgs<T> args)
         "Invalid kernel parameters. This is likely a bug in the "
         "TopkSpecializer.");
   }
-
+  num_threads = 128;
   void* kernel = GetKernel<T>(num_threads, args.k);
 
   int blocks_per_grid = args.batch_size;
   constexpr size_t max_kv_size = sizeof(uint64_t);
   // Allocate shmem assuming we have a full reduction.
-  int shmem_size = std::bit_ceil(args.k) * max_kv_size * 64;
+  //int shmem_size = std::bit_ceil(args.k) * max_kv_size * 64;
+  int shmem_size = num_threads;
   int slice_size = (args.num_elements + num_threads-1) / num_threads;
   VLOG("Testing N = " << args.num_elements << "; K = " << args.k <<
           "; batch_size: " << args.batch_size << 
@@ -69,8 +70,8 @@ void TypedTopK(TopkArgs<T> args)
   void* kernel_args[] = {&args.data, &args.num_elements, &args.top_elements,
                          &args.top_indices, &args.k};
   
-  CU_BEGIN_TIMING(5)
-  cudaLaunchKernel(kernel, blocks_per_grid, num_threads, kernel_args,
+  CU_BEGIN_TIMING(0)
+  (void)cudaLaunchKernel(kernel, blocks_per_grid, num_threads, kernel_args,
                        shmem_size, 0);
   CU_END_TIMING("TopK N = %zu; K = %zu; batch_size: %zu", 
       args.num_elements, args.k, args.batch_size);
@@ -128,7 +129,7 @@ void benchmark_topk(size_t batch_size, size_t N, size_t K, bool verify = true)
 
     checkme(gpu_iptr, idxs.data(), K, K, 1, eps, print_if_differs);
     //VLOG("------------------------------------------------------")
-    checkme(gpu_vptr, truth_vals.data(), K, K, 1, (float)1e-5, print_if_differs);
+    checkme(gpu_vptr, truth_vals.data(), K, K, 1, (NT)1e-5, print_if_differs);
   }
     
 }
@@ -136,6 +137,10 @@ void benchmark_topk(size_t batch_size, size_t N, size_t K, bool verify = true)
 int main() try 
 {
   DeviceInit();
+
+  benchmark_topk< uint32_t >(1, 200, 16, false);
+  return 0;
+
   //size_t batch_size, size_t N, size_t K
   for(size_t batch_size: {10, 20, 100, 200, 1000}) 
   {
@@ -144,7 +149,7 @@ int main() try
     {
       for(size_t K: {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16})
       {  
-        benchmark_topk< float >(batch_size, N, K);
+        //benchmark_topk< float >(batch_size, N, K);
       }
     }
   }

@@ -169,7 +169,12 @@ bool checkme(const NT *checkit, const NT *truth, size_t width, size_t stride,
                 continue;
 
             NT diff = pcheckit[i] - ptruth[i];
-            bool isDiff = std::abs(diff) > eps || nan1 || nan2;
+            bool isDiff = false;
+            if constexpr(std::is_floating_point_v< NT >) {
+                isDiff = std::abs(diff) > eps || nan1 || nan2;
+            } else {
+                isDiff = std::abs(std::make_signed_t<NT>(diff)) > eps;
+            }
             if(isDiff)
                 res = false;
 

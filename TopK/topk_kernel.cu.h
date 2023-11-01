@@ -260,9 +260,114 @@ __device__ FORCEINLINE void bitonic_rebuild(uint32_t lane, NT& A)
   }
 }
 
+template <uint32_t K, typename KT>
+__global__ void RunTopK_new(KT* data, uint32_t n, KT* result, uint32_t* result_idxs, int k) 
+{
+  constexpr uint32_t WarpSize = WAVEFRONT_SIZE;
+  constexpr auto minVal = std::numeric_limits< KT >::min();
+
+  const uint32_t bidx = blockIdx.x, blockSz = blockDim.x;
+  auto in = data + n * bidx;
+  auto vals_out = result + k * bidx;
+  auto idxs_out = result_idxs + k * bidx;
+
+  const uint32_t thid = threadIdx.x, lane = thid % WarpSize;
+  uint32_t idx = thid;
+
+  auto A = (idx < n ? in[idx] : minVal);
+  //LOUTZ("original: %d", A);
+
+  bitonic_local_sort<K>(lane, A);
+
+  uint32_t i = 0;
+  for(idx += blockSz; ; idx += blockSz, i++) {
+    auto warpId = idx & ~(WarpSize - 1);
+    //OUTZ("idx: %d, warpID: %d", idx, warpId);
+    if(warpId >= n) { // retire completely unused warps
+       break;
+    }
+    auto B = (idx < n ? in[idx] : minVal);
+    //LOUTZ("loaded B: %d = %d", idx, B);
+    bitonic_local_sort<K>(lane, B);
+
+    // merge K-sorted runs and keep only K greater elements
+    bitonic_merge<K>(lane, A);
+    bitonic_merge<K>(lane, B);
+    // merge maximal elements of A and B: shift B by K elements
+    // A: ABCD xxxx EFGH xxxx IJKL xxxx
+    // B: xxxx ABCD xxxx EFGH xxxx IJKL 
+    auto xA = A, xB = B;
+    // B[lane] = B[lane - K]
+    //! do we really need to shuffle ??
+    B = gpuShuffle< ShflType::Up >(B, K); 
+    if(lane & K) {
+      A = B;
+    }
+    //OUTZ("%d: idx: %d: xA = %d, A = %d; xB = %d, B = %d", thid, idx, xA, A, xB, B);
+    bitonic_rebuild< K >(lane, A);
+    
+    // if(idx < n)
+    // if(lane == 0) {
+    //   OUTZ("i = %d/%d; n = %d; mywarp: %d; my range: [%d; %d]", i, warpId, n, 
+    //         thid / WarpSize, warpId, warpId + WarpSize);
+    // }
+    // __syncthreads();
+  }
+  auto sh = (KT *)shmem;
+  sh[thid] = A;
+  //OUTZ("%d: xfinal: %d", thid, A);
+  //return;
+  __syncthreads();
+
+  const auto warpId = thid / WarpSize;
+  if(warpId == 0) {
+    for(uint32_t i = 1; i < blockSz / WarpSize; i++) {
+      auto B = sh[lane + i*WarpSize];
+      bitonic_merge<K>(lane, A);
+      bitonic_merge<K>(lane, B);
+      // optional ??
+      B = gpuShuffle< ShflType::Up >(B, K); 
+      if(lane & K) {
+        A = B;
+      }
+      bitonic_rebuild< K >(lane, A);
+    }
+    //LOUTZ("final: %d", A);
+      // finally each warp shall needs to reduce it's part down
+#pragma unroll  
+  for(uint32_t i = WarpSize / K, div = WarpSize/2; i > 1; i /= 2, div /= 2) {
+    bitonic_merge<K>(lane, A);
+    // same as: (lane & ~(K-1))*2 + (lane & (K-1))
+    auto idx = (lane / K)*2*K + lane % K;
+    A = gpuShuffle< ShflType::Sync >(A, idx); 
+    if(lane >= div) {
+      A = minVal; // remove lower unused elements
+    }
+    bitonic_rebuild< K >(lane, A);
+  }
+  LOUTZ("final: %d", A);
+  }
+
+
+  if(0)
+  {
+    // save upper half in shared memory  
+    int32_t idx = thid - (bidx / WarpSize + 1) / 2 * WarpSize; 
+    if(idx >= 0) {
+      sh[idx] = A;
+    }
+    __syncthreads();
+    auto warpId = thid / WarpSize;
+
+  }
+
+  
+}
+
+
 
 template <typename KT>
-__global__ void RunTopK_new(KT* data, int n, KT* result, uint32_t* result_idxs, int k) 
+__global__ void RunTopK_newZZZ(KT* data, int n, KT* result, uint32_t* result_idxs, int k) 
 {
   constexpr uint32_t WarpSize = WAVEFRONT_SIZE;
   uint32_t lane = threadIdx.x;
@@ -335,7 +440,7 @@ __global__ void RunTopK_new(KT* data, int n, KT* result, uint32_t* result_idxs, 
 template <typename T, size_t K>
 void* GetTopKKernelForK(size_t n_threads) {
 
-  return reinterpret_cast<void*>(RunTopK_new<T>);
+  return reinterpret_cast<void*>(RunTopK_new<K, T>);
   //return reinterpret_cast<void*>(RunTopK_default<K, T);
 }
 
