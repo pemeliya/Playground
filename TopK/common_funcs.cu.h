@@ -31,15 +31,16 @@ __device__ FORCEINLINE uint32_t bfe(uint32_t src, uint32_t startIdx, uint32_t wi
 }
 #endif
 
-enum ShuffleType {
-    stSync,
-    stUp,
-    stDown,
-    stXor
+
+enum class ShflType {
+    Sync,
+    Up,
+    Down,
+    Xor
 };
 
-template < ShuffleType Type, class NT >
-__device__ FORCEINLINE  NT shflType(NT val, uint32_t idx,
+template < ShflType Type, class NT >
+__device__ FORCEINLINE  NT gpuShuffle(NT val, uint32_t idx,
                                    uint32_t allmsk = 0xffffffffu)
 {
     constexpr uint32_t SZ = (sizeof(NT) + sizeof(uint32_t) - 1) / sizeof(uint32_t);
@@ -47,29 +48,29 @@ __device__ FORCEINLINE  NT shflType(NT val, uint32_t idx,
         NT v;
         uint32_t d[SZ];
     };
-    S in{ val }, res;
+    S in{ val }, res{};
 
     #pragma unroll
     for(uint32_t i = 0; i < SZ; i++) {
-#if COMPILE_FOR_ROCM
-        if(Type == stSync)
-            res.d[i] = __shfl(in.d[i], idx);
-        else if(Type == stUp)
-            res.d[i] = __shfl_up(in.d[i], idx);
-        else if(Type == stDown)
-            res.d[i] = __shfl_down(in.d[i], idx);
-        else if(Type == stXor)
-            res.d[i] = __shfl_xor(in.d[i], idx);
-#else
-        if(Type == stSync)
+#if !COMPILE_FOR_ROCM
+        if constexpr(Type == ShflType::Sync)
             res.d[i] = __shfl_sync(allmsk, in.d[i], idx);
-        else if(Type == stUp)
+        else if constexpr(Type == ShflType::Up)
             res.d[i] = __shfl_up_sync(allmsk, in.d[i], idx);
-        else if(Type == stDown)
+        else if constexpr(Type == ShflType::Down)
             res.d[i] = __shfl_down_sync(allmsk, in.d[i], idx);
-        else if(Type == stXor)
+        else if constexpr(Type == ShflType::Xor)
             res.d[i] = __shfl_xor_sync(allmsk, in.d[i], idx);
-#endif            
+#else
+        if constexpr(Type == ShflType::Sync)
+            res.d[i] = __shfl(in.d[i], idx);
+        else if constexpr(Type == ShflType::Up)
+            res.d[i] = __shfl_up(in.d[i], idx);
+        else if constexpr(Type == ShflType::Down)
+            res.d[i] = __shfl_down(in.d[i], idx);
+        else if constexpr(Type == ShflType::Xor)
+            res.d[i] = __shfl_xor(in.d[i], idx);
+#endif
     }
     return res.v;
 }
