@@ -83,6 +83,28 @@ struct MappedVector {
    NT *devPtr;
 };
 
+template < class T >
+constexpr hipblasltDatatype_t HipBlasltType(const T *) {
+  if constexpr (std::is_same_v<T, __half>) 
+    return HIPBLASLT_R_16F;
+  if constexpr (std::is_same_v<T, hip_bfloat16>) 
+    return HIPBLASLT_R_16B;
+  if constexpr (std::is_same_v<T, float>) 
+    return HIPBLASLT_R_32F;
+  if constexpr (std::is_same_v<T, double>) 
+    return HIPBLASLT_R_64F;
+  if constexpr (std::is_same_v<T, int32_t>) 
+    return HIPBLASLT_R_32I;
+  if constexpr (std::is_same_v<T, int8_t>) 
+    return HIPBLASLT_R_8I;
+  if constexpr (std::is_same_v<T, std::complex< float >>) 
+    return HIPBLASLT_C_32F;
+  if constexpr (std::is_same_v<T, std::complex< double >>) 
+    return HIPBLASLT_C_64F;
+  
+  return (hipblasltDatatype_t)-1;
+}
+
 template <typename T>
   using Owned =
       std::unique_ptr<std::remove_pointer_t<T>, hipblasStatus_t (*)(T)>;
@@ -209,13 +231,10 @@ struct GemmConfig {
   hipStream_t        stream;
 };
 
-void simpleGemm(GemmConfig& cfg)
+void simpleGemm(const GemmConfig& cfg)
 {
-    // HIPBLAS_R_32F is 151
-    // HIPBLAS_R_16F is 150
-    // HIPBLAS_R_16B is 168
-    LOG("Using datatype " << (int)HIPBLAS_R_16F << "," << HIPBLAS_R_16B << " HIPBLASLT_COMPUTE_F32 = " << HIPBLASLT_COMPUTE_F32) ;
-    LOG("Epilogue: " << HIPBLASLT_EPILOGUE_BIAS << ", HIPBLAS_OP_T =" << HIPBLAS_OP_T << ",HIPBLAS_OP_N = " << HIPBLAS_OP_N);
+    //LOG("Using datatype " << (int)HIPBLAS_R_16F << "," << HIPBLAS_R_16B << " HIPBLASLT_COMPUTE_F32 = " << HIPBLASLT_COMPUTE_F32) ;
+    //LOG("Epilogue: " << HIPBLASLT_EPILOGUE_BIAS << ", HIPBLAS_OP_T =" << HIPBLAS_OP_T << ",HIPBLAS_OP_N = " << HIPBLAS_OP_N);
 
     auto desc = MatmulDesc::Create(HIPBLASLT_COMPUTE_F32, HIPBLASLT_R_32F,
             cfg.trans_a, cfg.trans_b, cfg.epilogue);
@@ -291,28 +310,6 @@ void initVec(T *ptr, std::initializer_list< double > l)
   }
 }
 
-template < class T >
-constexpr hipblasltDatatype_t HipBlasltType(const T *) {
-  if constexpr (std::is_same_v<T, __half>) 
-    return HIPBLASLT_R_16F;
-  if constexpr (std::is_same_v<T, hip_bfloat16>) 
-    return HIPBLASLT_R_16B;
-  if constexpr (std::is_same_v<T, float>) 
-    return HIPBLASLT_R_32F;
-  if constexpr (std::is_same_v<T, double>) 
-    return HIPBLASLT_R_64F;
-  if constexpr (std::is_same_v<T, int32_t>) 
-    return HIPBLASLT_R_32I;
-  if constexpr (std::is_same_v<T, int8_t>) 
-    return HIPBLASLT_R_8I;
-  if constexpr (std::is_same_v<T, std::complex< float >>) 
-    return HIPBLASLT_C_32F;
-  if constexpr (std::is_same_v<T, std::complex< double >>) 
-    return HIPBLASLT_C_64F;
-  
-  return (hipblasltDatatype_t)-1;
-}
-
 int main(int argc, char *argv[]) try
 {
 	int m = 2, n = 2, k = 2;
@@ -336,9 +333,9 @@ int main(int argc, char *argv[]) try
   initVec(bias.devPtr, {10.0, 11.0});
 
   size_t max_workspace_size = 1ll << 32;
-  GemmConfig cfg {
+  simpleGemm(GemmConfig{
     .handle = blasLtObj.get(),
-    .trans_a = HIPBLAS_OP_T,
+    .trans_a = HIPBLAS_OP_N,
     .trans_b = HIPBLAS_OP_N,
     .m = m,
     .n = n,
@@ -354,12 +351,10 @@ int main(int argc, char *argv[]) try
     .d_c = d.devPtr,
     .d_d = d.devPtr,
     .d_bias = bias.devPtr,
-    .epilogue = HIPBLASLT_EPILOGUE_BIAS,
+    .epilogue = HIPBLASLT_EPILOGUE_DEFAULT,
     .max_workspace_size = max_workspace_size,
     .stream = 0,
-   };
-  
-  simpleGemm(cfg);
+  });
 
   CHK_HIP(hipDeviceSynchronize());
   for (int i=0;i<m;i++) {
