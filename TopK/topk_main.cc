@@ -47,21 +47,21 @@ struct TopkArgs {
 template <typename T>
 void TypedTopK(TopkArgs<T> args) 
 {
-  int num_threads = NumThreads(args.num_elements, args.k, args.batch_size);
+  uint32_t num_threads = NumThreads(args.num_elements, args.k, args.batch_size);
   if (num_threads == 0) {
     throw std::runtime_error(
         "Invalid kernel parameters. This is likely a bug in the "
         "TopkSpecializer.");
   }
-  num_threads = 128;
+  num_threads = 1024;
   void* kernel = GetKernel<T>(num_threads, args.k);
 
-  int blocks_per_grid = args.batch_size;
+  uint32_t blocks_per_grid = args.batch_size;
   constexpr size_t max_kv_size = sizeof(uint64_t);
   // Allocate shmem assuming we have a full reduction.
   //int shmem_size = std::bit_ceil(args.k) * max_kv_size * 64;
-  int shmem_size = num_threads;
-  int slice_size = (args.num_elements + num_threads-1) / num_threads;
+  uint32_t shmem_size = num_threads * sizeof(uint32_t);
+  uint32_t slice_size = (args.num_elements + num_threads-1) / num_threads;
   VLOG("Testing N = " << args.num_elements << "; K = " << args.k <<
           "; batch_size: " << args.batch_size << 
           "; n_blocks: " << blocks_per_grid << "; shmem_size: " << shmem_size
@@ -138,7 +138,7 @@ int main() try
 {
   DeviceInit();
 
-  benchmark_topk< uint32_t >(1, 200, 16, false);
+  benchmark_topk< uint32_t >(1, 1024, 16, false);
   return 0;
 
   //size_t batch_size, size_t N, size_t K

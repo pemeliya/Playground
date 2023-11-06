@@ -39,7 +39,7 @@
 #define CHK_HIPBLASLT(error)                                                      \
     if(error != HIPBLAS_STATUS_SUCCESS)                                                   \
     {                                                                                     \
-        fprintf(stderr, "hipBLASLt error(Err=%d) at %s:%d\n", error, __FILE__, __LINE__); \
+        fprintf(stderr, "hipBLASLt error %s at %s:%d\n", hipblasStatusToString(error), __FILE__, __LINE__); \
         fprintf(stderr, "\n");                                                            \
         throw 0;  \
     }
@@ -317,10 +317,15 @@ int main(int argc, char *argv[]) try
 
   BlasLt blasLtObj;
 
-  using TypeA = hip_bfloat16;
-  using TypeB = hip_bfloat16;
-  using TypeC = float;
-  using TypeD = float;
+  // using TypeA = hip_bfloat16;
+  // using TypeB = hip_bfloat16;
+  // using TypeC = float;
+  // using TypeD = float;
+
+  using TypeA = double;
+  using TypeB = double;
+  using TypeC = double;
+  using TypeD = double;
 
   MappedVector< TypeA > a(m * k);
   MappedVector< TypeB > b(n * k);

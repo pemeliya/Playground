@@ -314,12 +314,13 @@ __global__ void RunTopK_new(KT* data, uint32_t n, KT* result, uint32_t* result_i
     // __syncthreads();
   }
   auto sh = (KT *)shmem;
-  sh[thid] = A;
+
   //OUTZ("%d: xfinal: %d", thid, A);
   //return;
-  __syncthreads();
-
   const auto warpId = thid / WarpSize;
+#if 0
+  sh[thid] = A;
+   __syncthreads();
   if(warpId == 0) {
     for(uint32_t i = 1; i < blockSz / WarpSize; i++) {
       auto B = sh[lane + i*WarpSize];
@@ -332,39 +333,53 @@ __global__ void RunTopK_new(KT* data, uint32_t n, KT* result, uint32_t* result_i
       }
       bitonic_rebuild< K >(lane, A);
     }
-    //LOUTZ("final: %d", A);
-      // finally each warp shall needs to reduce it's part down
-#pragma unroll  
-  for(uint32_t i = WarpSize / K, div = WarpSize/2; i > 1; i /= 2, div /= 2) {
-    bitonic_merge<K>(lane, A);
-    // same as: (lane & ~(K-1))*2 + (lane & (K-1))
-    auto idx = (lane / K)*2*K + lane % K;
-    A = gpuShuffle< ShflType::Sync >(A, idx); 
-    if(lane >= div) {
-      A = minVal; // remove lower unused elements
-    }
-    bitonic_rebuild< K >(lane, A);
   }
-  LOUTZ("final: %d", A);
+#else
+  if(int32_t idx = thid - blockSz / 2; idx >= 0) { // only upper threads need to write
+    sh[idx] = A;
   }
+  for(uint32_t ofs = blockSz / 2, memofs = 0; ofs >= WarpSize; ofs = ofs / 2) {
 
-
-  if(0)
-  {
-    // save upper half in shared memory  
-    int32_t idx = thid - (bidx / WarpSize + 1) / 2 * WarpSize; 
-    if(idx >= 0) {
-      sh[idx] = A;
-    }
     __syncthreads();
-    auto warpId = thid / WarpSize;
+    if(thid < ofs) {
+      // save upper half in shared memory  
+      //int32_t idx = thid - (bidx / WarpSize + 1) / 2 * WarpSize; 
+      auto B = sh[thid + memofs];
 
+      bitonic_merge<K>(lane, A);
+      bitonic_merge<K>(lane, B);
+      // optional ??
+      B = gpuShuffle< ShflType::Up >(B, K); 
+      if(lane & K) {
+        A = B;
+      }
+      bitonic_rebuild< K >(lane, A);
+      // actually only upper blocks need to write back
+      if(thid >= ofs/2) {
+        sh[thid + memofs] = A; // write to the same place where we read from
+      }
+      // if(thid == 0)
+      // LOUTZ("ofs: %d memofs: %d, A = %d, B = %d", ofs, memofs, A, B);
+    }
+    memofs += ofs/2;
+  } // for ofs
+#endif
+    //LOUTZ("final: %d", A);
+  if(warpId == 0) {
+#pragma unroll      
+    for(uint32_t i = WarpSize / K, div = WarpSize/2; i > 1; i /= 2, div /= 2) {
+      bitonic_merge<K>(lane, A);
+      // same as: (lane & ~(K-1))*2 + (lane & (K-1))
+      auto idx = (lane / K)*2*K + lane % K;
+      A = gpuShuffle< ShflType::Sync >(A, idx); 
+      if(lane >= div) {
+        A = minVal; // remove lower unused elements
+      }
+      bitonic_rebuild< K >(lane, A);
+    }
+    LOUTZ("final: %d", A);
   }
-
-  
 }
-
-
 
 template <typename KT>
 __global__ void RunTopK_newZZZ(KT* data, int n, KT* result, uint32_t* result_idxs, int k) 
