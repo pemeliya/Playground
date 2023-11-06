@@ -19,6 +19,8 @@ limitations under the License.
 #include <stddef.h>
 #include <stdint.h>
 
+#define USE_TOPK_DEFAULT 0
+
 constexpr size_t kTopKMaxThreadsPerBlock = 1024;
 
 template <typename T, size_t K>

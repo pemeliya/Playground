@@ -109,7 +109,16 @@ struct MappedVector {
    void copyDToH() {
    }
    size_t size() const { return N; }
+   NT *data() {
+    return devPtr;
+   }
+   const NT *data() const {
+    return devPtr;
+   }
    NT& operator[](size_t i) {
+      return devPtr[i];
+   }
+   const NT& operator[](size_t i) const {
       return devPtr[i];
    }
    ~MappedVector() {
