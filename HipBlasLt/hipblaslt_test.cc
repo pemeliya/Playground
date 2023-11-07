@@ -5,11 +5,17 @@
 // HIPBLASLT_LOG_MASK=5 HIPBLASLT_LOG_LEVEL=5 ./a.out
 
 #include <hip/hip_fp16.h>
-#include <hipblaslt/hipblaslt.h>
 #include <iostream>
 #include <optional>
 
-//#if TF_ROCM_VERSION < 60000
+#ifdef USE_EXTERNAL_HIPBLASLT
+#include "include/hipblaslt/hipblaslt-version.h"
+#include "include/hipblaslt/hipblaslt.h"
+#else
+#include <hipblaslt/hipblaslt.h>
+#endif
+
+#if HIPBLASLT_VERSION_MINOR < 6
 #define hipblasltDatatype_t hipblasDatatype_t
 #define HIPBLASLT_R_16F HIPBLAS_R_16F
 #define HIPBLASLT_R_16B HIPBLAS_R_16B
@@ -19,7 +25,7 @@
 #define HIPBLASLT_R_32I HIPBLAS_R_32I
 #define HIPBLASLT_C_32F HIPBLAS_C_32F
 #define HIPBLASLT_C_64F HIPBLAS_C_64F
-//#endif
+#endif
 
 #define LOG(x) std::cerr << x << std::endl
 
@@ -27,7 +33,7 @@
 #define CHK_HIP(error)                    \
     if(error != hipSuccess)                       \
     {                                             \
-        fprintf(stderr, "Hip error: '%s'(%d) at %s:%d\n",  hipGetErrorString(error),         \ 
+        fprintf(stderr, "Hip error: '%s'(%d) at %s:%d\n",  hipGetErrorString(error),    \
                 error,                            \
                 __FILE__,                         \
                 __LINE__);                        \
@@ -103,6 +109,22 @@ constexpr hipblasltDatatype_t HipBlasltType(const T *) {
     return HIPBLASLT_C_64F;
   
   return (hipblasltDatatype_t)-1;
+}
+
+template < class T >
+void initVec(T *ptr, std::initializer_list< double > l) 
+{
+  for(const auto& elem : l) {
+    *ptr++ = static_cast< T >(elem);
+  }
+}
+
+template < class T >
+void initRange(T *ptr, double start, double step, size_t n) 
+{
+  for(size_t i = 0; i < n; i++) {
+    *ptr++ = static_cast< T >(start + i*step);
+  }
 }
 
 template <typename T>
@@ -212,11 +234,13 @@ struct GemmConfig {
   hipblasLtHandle_t  handle;
   hipblasOperation_t trans_a;
   hipblasOperation_t trans_b;
+  hipblasLtComputeType_t compute_type;
   int64_t            m;
   int64_t            n;
   int64_t            k;
-  float              alpha;
-  float              beta;
+  void*              palpha;
+  void*              pbeta;
+  hipblasltDatatype_t scale_type;
   hipblasltDatatype_t type_a;
   hipblasltDatatype_t type_b;
   hipblasltDatatype_t type_c;
@@ -236,7 +260,7 @@ void simpleGemm(const GemmConfig& cfg)
     //LOG("Using datatype " << (int)HIPBLAS_R_16F << "," << HIPBLAS_R_16B << " HIPBLASLT_COMPUTE_F32 = " << HIPBLASLT_COMPUTE_F32) ;
     //LOG("Epilogue: " << HIPBLASLT_EPILOGUE_BIAS << ", HIPBLAS_OP_T =" << HIPBLAS_OP_T << ",HIPBLAS_OP_N = " << HIPBLAS_OP_N);
 
-    auto desc = MatmulDesc::Create(HIPBLASLT_COMPUTE_F32, HIPBLASLT_R_32F,
+    auto desc = MatmulDesc::Create(cfg.compute_type, cfg.scale_type,
             cfg.trans_a, cfg.trans_b, cfg.epilogue);
 
     auto order = HipMatrixLayout::Order::kColumnMajor;
@@ -247,8 +271,8 @@ void simpleGemm(const GemmConfig& cfg)
 
     if (cfg.epilogue == HIPBLASLT_EPILOGUE_BIAS) {
       static int dummy;
-			CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
-			 		desc.get(), HIPBLASLT_MATMUL_DESC_BIAS_POINTER, &dummy, sizeof(void*)));
+		  CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+			    desc.get(), HIPBLASLT_MATMUL_DESC_BIAS_POINTER, &dummy, sizeof(void*)));
     }
 
     // Set User Preference attributes
@@ -293,32 +317,28 @@ void simpleGemm(const GemmConfig& cfg)
 					desc.get(), HIPBLASLT_MATMUL_DESC_BIAS_POINTER, &cfg.d_bias, sizeof(cfg.d_bias)));
     }
 
-    CHK_HIPBLASLT(hipblasLtMatmul(cfg.handle, desc.get(), &cfg.alpha,
+    CHK_HIPBLASLT(hipblasLtMatmul(cfg.handle, desc.get(), cfg.palpha,
                  cfg.d_a, matA.get(),
-                 cfg.d_b, matB.get(), &cfg.beta,
+                 cfg.d_b, matB.get(), cfg.pbeta,
                  cfg.d_c, matC.get(),
                  cfg.d_d, matD.get(),
                  &algoOK.algo,
                  d_workspace, workspace_size, cfg.stream));
 }
 
-template < class T >
-void initVec(T *ptr, std::initializer_list< double > l) 
-{
-  for(const auto& elem : l) {
-    *ptr++ = static_cast< T >(elem);
-  }
-}
-
 int main(int argc, char *argv[]) try
 {
-	int m = 2, n = 2, k = 2;
-  float alpha = 1.0, beta = 0.0;
+	int m = 3, n = 2, k = 4;
+  double alpha = 1.0, beta = 0.0;
 
   BlasLt blasLtObj;
 
-  // using TypeA = hip_bfloat16;
-  // using TypeB = hip_bfloat16;
+  // __half + float works
+  // bfloat16 + float: no valid solutions
+  // F64 - returns all zeros
+
+  // using TypeA = float;//hip_bfloat16;
+  // using TypeB = float;//hip_bfloat16;
   // using TypeC = float;
   // using TypeD = float;
 
@@ -327,26 +347,34 @@ int main(int argc, char *argv[]) try
   using TypeC = double;
   using TypeD = double;
 
-  MappedVector< TypeA > a(m * k);
-  MappedVector< TypeB > b(n * k);
-  MappedVector< TypeC > c(m * n);
-  MappedVector< TypeD > d(m * n);
-  MappedVector< TypeD > bias(m);
+  // using TypeA = std::complex<float>;
+  // using TypeB = std::complex<float>;
+  // using TypeC = std::complex<float>;
+  // using TypeD = std::complex<float>;
 
-  initVec(a.devPtr, {10.0, 12.0, 11.0, 13.0});
-  initVec(b.devPtr, {1.0, 3.0, 2.0, 4.0});
-  initVec(bias.devPtr, {10.0, 11.0});
+  size_t extra = 0;
+  MappedVector< TypeA > a(m * k + extra);
+  MappedVector< TypeB > b(n * k + extra);
+  MappedVector< TypeC > c(m * n + extra);
+  MappedVector< TypeD > d(m * n + extra);
+  MappedVector< TypeD > bias(m + extra);
+
+  initRange(a.devPtr, 1.0, 1.0, m*k);
+  initRange(b.devPtr, 3.0, 0.5, n*k);
+  initVec(bias.devPtr, {10.0, 11.0, 12.0});
 
   size_t max_workspace_size = 1ll << 32;
   simpleGemm(GemmConfig{
     .handle = blasLtObj.get(),
     .trans_a = HIPBLAS_OP_N,
     .trans_b = HIPBLAS_OP_N,
+    .compute_type = HIPBLASLT_COMPUTE_F32,
     .m = m,
     .n = n,
     .k = k,
-    .alpha = alpha,
-    .beta = beta,
+    .palpha = &alpha,
+    .pbeta = &beta,
+    .scale_type = HipBlasltType(&alpha),
     .type_a = HipBlasltType(a.devPtr),
     .type_b = HipBlasltType(b.devPtr),
     .type_c = HipBlasltType(c.devPtr),
@@ -361,12 +389,33 @@ int main(int argc, char *argv[]) try
     .stream = 0,
   });
 
+  //   HIPBLASLT_EPILOGUE_DEFAULT = 1,         /**<No special postprocessing, just scale and quantize the results if necessary.*/
+  // HIPBLASLT_EPILOGUE_RELU = 2,            /**<Apply ReLU point-wise transform to the results:(x:=max(x, 0))*/
+  // HIPBLASLT_EPILOGUE_BIAS = 4,            /**<Apply (broadcast) bias from the bias vector. Bias vector length must match matrix D rows, and it must be packed (such as stride between vector elements is 1). Bias vector is broadcast to all columns and added before applying the final postprocessing.*/
+  // HIPBLASLT_EPILOGUE_RELU_BIAS = 6,       /**<Apply bias and then ReLU transform.*/
+  // HIPBLASLT_EPILOGUE_GELU = 32,           /**<Apply GELU point-wise transform to the results (x:=GELU(x)).*/
+  // HIPBLASLT_EPILOGUE_GELU_BIAS = 36,      /**<Apply Bias and then GELU transform.*/
+  // HIPBLASLT_EPILOGUE_GELU_AUX = 160,      /**<Output GEMM results before applying GELU transform.*/
+  // HIPBLASLT_EPILOGUE_GELU_AUX_BIAS = 164, /**<Output GEMM results after applying bias but before applying GELU transform.*/
+  // HIPBLASLT_EPILOGUE_DGELU = 192,         /**<Apply gradient GELU transform. Requires additional aux input. */
+  // HIPBLASLT_EPILOGUE_DGELU_BGRAD = 208,   /**<Apply gradient GELU transform and bias gradient to the results. Requires additional aux input. */
+  // HIPBLASLT_EPILOGUE_BGRADA = 256,        /**<Apply bias gradient to A and output gemm result. */
+  // HIPBLASLT_EPILOGUE_BGRADB = 512   
+
   CHK_HIP(hipDeviceSynchronize());
-  for (int i=0;i<m;i++) {
-     for (int j=0;j<n;j++) {
-				std::cout << static_cast<float>(d[i*n+j]) << " ";
-			}
-      std::cout << std::endl;
+  bool isCpx = HipBlasltType(d.devPtr) == HIPBLASLT_C_32F ||
+               HipBlasltType(d.devPtr) == HIPBLASLT_C_64F;
+
+  for (int i = 0; i < m; i++) {
+  for (int j = 0; j < n; j++) {
+    auto& D = d[i * n + j];
+    if(isCpx) {
+  		  std::cout << D << " ";
+      } else {
+        std::cout << static_cast<float>(D) << " ";
+      } 
+   	}
+    std::cout << std::endl;
   }
   return 0;
 }
