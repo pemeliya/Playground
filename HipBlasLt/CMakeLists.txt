@@ -17,7 +17,7 @@ file(GLOB INC *.h *.hpp ../common/*.h ../common/*.hpp)
 file(GLOB SRC *.cpp *.cc)
 file(GLOB GPU_SRC *.cu.cc)
 
-set(USE_EXTERNAL_HIPBLASLT 0)
+set(USE_EXTERNAL_HIPBLASLT 1)
 set(HIPBLASLT_DIR "/tf/Playground/hipBLASLt/build/release/hipblaslt-install")
 
 if(NOT ${COMPILE_FOR_ROCM})

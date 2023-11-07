@@ -5,6 +5,7 @@
 // HIPBLASLT_LOG_MASK=5 HIPBLASLT_LOG_LEVEL=5 ./a.out
 
 #include <hip/hip_fp16.h>
+#include <hip/hip_complex.h>
 #include <iostream>
 #include <optional>
 
@@ -103,12 +104,20 @@ constexpr hipblasltDatatype_t HipBlasltType(const T *) {
     return HIPBLASLT_R_32I;
   if constexpr (std::is_same_v<T, int8_t>) 
     return HIPBLASLT_R_8I;
-  if constexpr (std::is_same_v<T, std::complex< float >>) 
+  if constexpr (std::is_same_v<T, hipFloatComplex>) 
     return HIPBLASLT_C_32F;
-  if constexpr (std::is_same_v<T, std::complex< double >>) 
+  if constexpr (std::is_same_v<T, hipDoubleComplex>) 
     return HIPBLASLT_C_64F;
   
   return (hipblasltDatatype_t)-1;
+}
+
+std::ostream& operator<<(std::ostream& os, hipFloatComplex Z) {
+  return os << Z.x << "+i*" << Z.y;
+}
+
+std::ostream& operator<<(std::ostream& os, hipDoubleComplex Z) {
+  return os << Z.x << "+i*" << Z.y;
 }
 
 template < class T >
@@ -329,7 +338,7 @@ void simpleGemm(const GemmConfig& cfg)
 int main(int argc, char *argv[]) try
 {
 	int m = 3, n = 2, k = 4;
-  double alpha = 1.0, beta = 0.0;
+  float alpha{1.0}, beta{0.0};
 
   BlasLt blasLtObj;
 
@@ -337,22 +346,22 @@ int main(int argc, char *argv[]) try
   // bfloat16 + float: no valid solutions
   // F64 - returns all zeros
 
-  // using TypeA = float;//hip_bfloat16;
-  // using TypeB = float;//hip_bfloat16;
-  // using TypeC = float;
-  // using TypeD = float;
+  using TypeA = float;//hip_bfloat16;
+  using TypeB = float;//hip_bfloat16;
+  using TypeC = float;
+  using TypeD = float;
 
-  using TypeA = double;
-  using TypeB = double;
-  using TypeC = double;
-  using TypeD = double;
+  // using TypeA = double;
+  // using TypeB = double;
+  // using TypeC = double;
+  // using TypeD = double;
 
-  // using TypeA = std::complex<float>;
-  // using TypeB = std::complex<float>;
-  // using TypeC = std::complex<float>;
-  // using TypeD = std::complex<float>;
+  // using TypeA = hipDoubleComplex;
+  // using TypeB = hipDoubleComplex;
+  // using TypeC = hipDoubleComplex;
+  // using TypeD = hipDoubleComplex;
 
-  size_t extra = 0;
+  size_t extra = 1000;
   MappedVector< TypeA > a(m * k + extra);
   MappedVector< TypeB > b(n * k + extra);
   MappedVector< TypeC > c(m * n + extra);
@@ -384,7 +393,7 @@ int main(int argc, char *argv[]) try
     .d_c = d.devPtr,
     .d_d = d.devPtr,
     .d_bias = bias.devPtr,
-    .epilogue = HIPBLASLT_EPILOGUE_DEFAULT,
+    .epilogue = HIPBLASLT_EPILOGUE_GELU_BIAS,
     .max_workspace_size = max_workspace_size,
     .stream = 0,
   });
@@ -403,17 +412,11 @@ int main(int argc, char *argv[]) try
   // HIPBLASLT_EPILOGUE_BGRADB = 512   
 
   CHK_HIP(hipDeviceSynchronize());
-  bool isCpx = HipBlasltType(d.devPtr) == HIPBLASLT_C_32F ||
-               HipBlasltType(d.devPtr) == HIPBLASLT_C_64F;
 
   for (int i = 0; i < m; i++) {
   for (int j = 0; j < n; j++) {
-    auto& D = d[i * n + j];
-    if(isCpx) {
-  		  std::cout << D << " ";
-      } else {
-        std::cout << static_cast<float>(D) << " ";
-      } 
+      auto& D = d[i * n + j];
+      std::cout << D << " ";
    	}
     std::cout << std::endl;
   }
