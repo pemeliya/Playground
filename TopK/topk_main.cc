@@ -144,7 +144,8 @@ int main() try
 {
   DeviceInit();
 
-  benchmark_topk< uint32_t >(1024, 1024, 16, true);
+  benchmark_topk< uint32_t >(1024, 
+                            1024*1024, 16, false);
   return 0;
 
   //size_t batch_size, size_t N, size_t K

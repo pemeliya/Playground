@@ -23,6 +23,21 @@
 #define WAVEFRONT_SIZE 32 
 #endif
 
+
+/*
+/opt/rocm/include/hip/amd_detail/amd_warp_functions.h:
+static constexpr int warpSize = __AMDGCN_WAVEFRONT_SIZE;
+
+__device__
+inline
+int __shfl_xor(int var, int lane_mask, int width = warpSize) {
+    int self = __lane_id();
+    int index = self^lane_mask;
+    index = index >= ((self+width)&~(width-1))?self:index;
+    return __builtin_amdgcn_ds_bpermute(index<<2, var);
+}
+*/
+
 #define OUTZ(fmt, ...) printf(fmt"\n", ##__VA_ARGS__)
 
 #define LOUTZ(fmt, ...) printf("%d :" fmt "\n", lane, ##__VA_ARGS__)
@@ -164,7 +179,7 @@ __launch_bounds__(1024, 1) __global__
   obj.MergeTopKs(vals_out, idxs_out);
 }
 
-template <class NT, class LessOp >
+template <class NT >
 __device__ void bitonic_warp_sort(uint32_t lane, NT& d)
 {
   constexpr uint32_t WarpSize = WAVEFRONT_SIZE;
@@ -217,6 +232,8 @@ constexpr uint32_t log2xN(uint32_t x) {
 template <uint32_t K, typename KT>
 struct BitonicTopK {
   
+  constexpr static uint32_t logK = log2xN(K);
+
   struct KVT {
     KT key;
     uint32_t idx;
@@ -232,16 +249,16 @@ struct BitonicTopK {
   {
 #pragma unroll    
     // this produces sequences of length K: alternating ascending - descending
-    for(int32_t i = 2; i <= K; i *= 2) {
-      int32_t biti = (lane & i) == i; // // __builtin_amdgcn_ubfe ??
+    for(int32_t i = 1; i <= logK; i++) {
+      int32_t biti = gpuGetBit(lane, i);
 #pragma unroll    
       // after step i, we have bitonic sequences of size i*2
       // i == 2: j = 1
       // i == 4: j = 2, 1
       // i == 8: j = 4, 2, 1
-      for(int32_t j = i / 2; j >= 1; j /= 2) {
-        int32_t bitj = (lane & j) == j;
-        auto xA = gpuShuffle< ShflType::Xor >(A, j); 
+      for(int32_t j = i - 1; j >= 0; j--) {
+        int32_t bitj = gpuGetBit(lane, j);
+        auto xA = gpuShuffle< ShflType::Xor >(A, 1u << j); 
         if((biti ^ bitj ^ (A < xA)) == 0) {
           A = xA;
         }
@@ -258,11 +275,12 @@ struct BitonicTopK {
   __device__ FORCEINLINE void rebuild(uint32_t lane, KVT& A) 
   {
     // rebuild bitonic sequences of length K to sorted ones
-    int32_t bitK = (lane & K) == K; 
+    int32_t bitK = gpuGetBit(lane, logK); 
 #pragma unroll    
-    for(int32_t j = K / 2; j >= 1; j /= 2) {
-      int32_t bitj = (lane & j) == j;
-      auto xA = gpuShuffle< ShflType::Xor >(A, j); 
+    for(int32_t j = logK - 1; j >= 0; j--) {
+      int32_t bitj = gpuGetBit(lane, j);
+      // src = lane ^ (1u << j);
+      auto xA = gpuShuffle< ShflType::Xor >(A, 1u << j); 
       if((bitK ^ bitj ^ (A < xA)) == 0) {
         A = xA;
       }
@@ -299,7 +317,7 @@ struct BitonicTopK {
     KVT A{idx < n ? in[idx] : minVal, idx};
     //LOUTZ("original: %d", A);
     local_sort(lane, A);
-
+    
     uint32_t i = 0;
     for(idx += blockSz; ; idx += blockSz, i++) {
       auto warpId = idx & ~(WarpSize - 1);
@@ -307,8 +325,12 @@ struct BitonicTopK {
       if(warpId >= n) { // retire completely unused warps
          break;
       }
+     //__builtin_amdgcn_update_dpp();
+    //__builtin_amdgcn_ds_sizzle();
+
       KVT B{idx < n ? in[idx] : minVal, idx};
-      //LOUTZ("loaded B: %d = %d", idx, B);
+      // if(thid == 1023)
+      // LOUTZ("loaded B: %d = %d", idx, B.key);
       local_sort(lane, B);
       merge(lane, A, B);
       //OUTZ("%d: idx: %d: xA = %d, A = %d; xB = %d, B = %d", thid, idx, xA, A, xB, B);
@@ -351,13 +373,10 @@ struct BitonicTopK {
         if(thid >= ofs/2) {
           sh[thid + memofs] = A; // write to the same place where we read from
         }
-        // if(thid == 0)
-        // LOUTZ("ofs: %d memofs: %d, A = %d, B = %d", ofs, memofs, A, B);
       }
       memofs += ofs/2;
     } // for ofs
 #endif
-    //LOUTZ("final: %d", A);
     if(warpId == 0) {
 #pragma unroll      
       for(uint32_t i = WarpSize / K, div = WarpSize/2; i > 1; i /= 2, div /= 2) {
@@ -393,13 +412,17 @@ __global__ void RunTopK_new(const KT * __restrict__ data, uint32_t n,
 }
 
 template <typename KT>
-__global__ void RunTopK_newZZZ(KT* data, int n, KT* result, uint32_t* result_idxs, int k) 
+__global__ void RunTopK_test(KT* data, int n, KT* result, uint32_t* result_idxs, int k) 
 {
   constexpr uint32_t WarpSize = WAVEFRONT_SIZE;
   uint32_t lane = threadIdx.x;
   if(lane >= WarpSize)
     return;
-  
+
+  // auto z = __builtin_amdgcn_ubfe(lane, 0, 1);
+  // auto z2 = __builtin_amdgcn_ubfe(lane, 1, 1);
+  //LOUTZ("%d / %d", z, z2);
+#if 1  
   constexpr uint32_t K = 4;
   using TopK = BitonicTopK< K, KT >;
   using KVT = typename TopK::KVT;
@@ -409,7 +432,7 @@ __global__ void RunTopK_newZZZ(KT* data, int n, KT* result, uint32_t* result_idx
       minVal{0, 0};
   KVT B{((lane+1)*(lane-1)*(lane-1)) % 97, lane};
 
-#define XS(idx, val)  if(lane == idx) A = val
+#define XS(idx, val)  if(lane == idx) A.key = val
   XS(0, 3);
   XS(1, 7);
   XS(2, 4);
@@ -466,6 +489,7 @@ __global__ void RunTopK_newZZZ(KT* data, int n, KT* result, uint32_t* result_idx
   }
   //LOUTZ("local sorted: %d; merged: %d, shifted: %d", A, mA, zA);
   OUTZ("%d: squashed: %d", lane, A);
+#endif  
 }
 
 template <typename T, size_t K>
@@ -474,6 +498,7 @@ void* GetTopKKernelForK(size_t n_threads) {
   return reinterpret_cast<void*>(RunTopK_default<K, T>);
 #else  
   return reinterpret_cast<void*>(RunTopK_new<K, T>);
+          //RunTopK_test<T>);
 #endif
 }
 

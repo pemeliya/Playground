@@ -92,7 +92,7 @@ struct HVector : std::vector< NT > {
    }
    ~HVector() {
       if(devPtr) {
-        cudaFree(devPtr);
+        (void)cudaFree(devPtr);
       }
    }
    NT *devPtr = nullptr;

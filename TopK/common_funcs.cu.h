@@ -39,6 +39,17 @@ enum class ShflType {
     Xor
 };
 
+__device__ FORCEINLINE uint32_t gpuGetBit(uint32_t src, uint32_t idx)
+{
+#if !COMPILE_FOR_ROCM    
+    uint32_t bit;
+    asm volatile("bfe.u32 %0, %1, %2, %3;" : "=r"(bit) : "r"(src), "r"(idx), "r"(1));
+    return bit;
+#else
+    return __builtin_amdgcn_ubfe(src, idx, 1);
+#endif
+}
+
 template < ShflType Type, class NT >
 __device__ FORCEINLINE  NT gpuShuffle(NT val, uint32_t idx,
                                    uint32_t allmsk = 0xffffffffu)
@@ -62,6 +73,7 @@ __device__ FORCEINLINE  NT gpuShuffle(NT val, uint32_t idx,
         else if constexpr(Type == ShflType::Xor)
             res.d[i] = __shfl_xor_sync(allmsk, in.d[i], idx);
 #else
+        //res.d[i] += __builtin_amdgcn_ds_swizzle(in.d[i], 0x1111);
         if constexpr(Type == ShflType::Sync)
             res.d[i] = __shfl(in.d[i], idx);
         else if constexpr(Type == ShflType::Up)
