@@ -30,27 +30,15 @@
 
 #define LOG(x) std::cerr << x << std::endl
 
-#ifndef CHK_HIP
-#define CHK_HIP(error)                    \
-    if(error != hipSuccess)                       \
-    {                                             \
-        fprintf(stderr, "Hip error: '%s'(%d) at %s:%d\n",  hipGetErrorString(error),    \
-                error,                            \
-                __FILE__,                         \
-                __LINE__);                        \
-        throw 0;  \
+#define CHK_HIP(error) if(error != hipSuccess) { \
+        fprintf(stderr, "Hip error: '%s'(%d) at %s:%d\n", hipGetErrorString(error),  \
+                error, __FILE__, __LINE__); throw 0;  \
     }
-#endif
 
-#ifndef CHK_HIPBLASLT
-#define CHK_HIPBLASLT(error)                                                      \
-    if(error != HIPBLAS_STATUS_SUCCESS)                                                   \
-    {                                                                                     \
-        fprintf(stderr, "hipBLASLt error %s at %s:%d\n", hipblasStatusToString(error), __FILE__, __LINE__); \
-        fprintf(stderr, "\n");                                                            \
-        throw 0;  \
+#define CHK_HIPBLASLT(error) if(error != HIPBLAS_STATUS_SUCCESS) { \
+       fprintf(stderr, "hipBLASLt error %s at %s:%d\n", hipblasStatusToString(error), \
+            __FILE__, __LINE__); throw 0;  \
     }
-#endif
 
 #define SET_ATTR(setter, handle, attr, value) \
   CHK_HIPBLASLT(setter(handle, attr, &value, sizeof(decltype(value))))
@@ -137,7 +125,7 @@ void initRange(T *ptr, double start, double step, size_t n)
 }
 
 template <typename T>
-  using Owned =
+using Owned =
       std::unique_ptr<std::remove_pointer_t<T>, hipblasStatus_t (*)(T)>;
 
 struct BlasLt {
@@ -159,16 +147,11 @@ struct HipMatrixLayout {
 
     enum class Order { kRowMajor, kColumnMajor };
 
-    // If `leading_dim_stride` is not specified, it defaults to:
-    //  - `num_cols` if `order == kRowMajor`,
-    //  - `num_rows` if `order == kColumnMajor`.
-    // If `batch_stride` is not specified, it defaults to `num_rows * num_cols`
-    // if `batch_size > 1`, otherwise `0`.
-    static HipMatrixLayout Create(
-        hipblasltDatatype_t type, size_t num_rows, size_t num_cols, Order order,
-        size_t batch_size = 1,
-        std::optional<int64_t> leading_dim_stride = std::nullopt,
-        std::optional<int64_t> batch_stride = std::nullopt) {
+    HipMatrixLayout(hipblasltDatatype_t type, size_t num_rows, size_t num_cols, 
+          Order order, size_t batch_size = 1,
+          std::optional<int64_t> leading_dim_stride = std::nullopt,
+          std::optional<int64_t> batch_stride = std::nullopt)
+        : handle_(nullptr, hipblasLtMatrixLayoutDestroy) {
 
       if (!leading_dim_stride) {
         leading_dim_stride = (order == Order::kRowMajor) ? num_cols : num_rows;
@@ -177,65 +160,54 @@ struct HipMatrixLayout {
       CHK_HIPBLASLT(hipblasLtMatrixLayoutCreate(
         &hip_layout, type, num_rows, num_cols,
         *leading_dim_stride));
-  
+
       // Wrap hipblas handle immediately, so it is cleaned up if an error occurs.
-      HipMatrixLayout layout(hip_layout);
+      handle_.reset(hip_layout);
       SetAttr(hip_layout, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT,
                               static_cast<int32_t>(batch_size));
 
       if (!batch_stride) {
         batch_stride = (batch_size > 1) ? num_rows * num_cols : 0;
       }
-
-      LOG("MatrixLayout create: type: " << (int)type << ","
+      LOG("MatrixLayout type: " << (int)type << ","
           << num_rows << "x" << num_cols << " leadingdim: "
           << *leading_dim_stride << " batchstride: " <<  *batch_stride);
 
       SetAttr(
            hip_layout, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, *batch_stride);
-      return std::move(layout);
     }
 
     hipblasLtMatrixLayout_t get() const { return handle_.get(); }
 
-   private:
-    explicit HipMatrixLayout(hipblasLtMatrixLayout_t handle)
-        : handle_(handle, hipblasLtMatrixLayoutDestroy) {}
-
+  private:
     Owned<hipblasLtMatrixLayout_t> handle_;
 };
 
 struct MatmulDesc {
 
-    static MatmulDesc Create(
-        hipblasLtComputeType_t compute_type, hipblasltDatatype_t scale_type,
-        hipblasOperation_t trans_a,
-        hipblasOperation_t trans_b,
-        hipblasLtEpilogue_t epilogue) {
+    MatmulDesc(hipblasLtComputeType_t compute_type, hipblasltDatatype_t scale_type,
+        hipblasOperation_t trans_a, hipblasOperation_t trans_b,
+        hipblasLtEpilogue_t epilogue)
+        : handle_(nullptr, hipblasLtMatmulDescDestroy) {
 
       hipblasLtMatmulDesc_t hip_desc;
-      LOG("MatmulDesc::Create compute_type: " << compute_type
+      LOG("MatmulDesc compute_type: " << compute_type
           << " scale_type " << scale_type << " epilogue " << int(epilogue)
           << " transA " << trans_a << " transB " << trans_b);
 
       CHK_HIPBLASLT(hipblasLtMatmulDescCreate(
         &hip_desc, compute_type, scale_type));
         // Wrap hipblas handle immediately, so it is cleaned up if an error occurs.
-      MatmulDesc desc(hip_desc);
+      handle_.reset(hip_desc);
 
       SetAttr(hip_desc, HIPBLASLT_MATMUL_DESC_TRANSA, trans_a);
       SetAttr(hip_desc, HIPBLASLT_MATMUL_DESC_TRANSB, trans_b);
       SetAttr(hip_desc, HIPBLASLT_MATMUL_DESC_EPILOGUE, epilogue);
-
-      return std::move(desc);
     }
 
     hipblasLtMatmulDesc_t get() const { return handle_.get(); }
 
    private:
-    explicit MatmulDesc(hipblasLtMatmulDesc_t handle)
-        : handle_(handle, hipblasLtMatmulDescDestroy) {}
-
     Owned<hipblasLtMatmulDesc_t> handle_;
   };
 
@@ -266,17 +238,14 @@ struct GemmConfig {
 
 void simpleGemm(const GemmConfig& cfg)
 {
-    //LOG("Using datatype " << (int)HIPBLAS_R_16F << "," << HIPBLAS_R_16B << " HIPBLASLT_COMPUTE_F32 = " << HIPBLASLT_COMPUTE_F32) ;
-    //LOG("Epilogue: " << HIPBLASLT_EPILOGUE_BIAS << ", HIPBLAS_OP_T =" << HIPBLAS_OP_T << ",HIPBLAS_OP_N = " << HIPBLAS_OP_N);
-
-    auto desc = MatmulDesc::Create(cfg.compute_type, cfg.scale_type,
+    MatmulDesc desc(cfg.compute_type, cfg.scale_type,
             cfg.trans_a, cfg.trans_b, cfg.epilogue);
 
     auto order = HipMatrixLayout::Order::kColumnMajor;
-    auto matA = HipMatrixLayout::Create(cfg.type_a, cfg.m, cfg.k, order);
-    auto matB = HipMatrixLayout::Create(cfg.type_b, cfg.k, cfg.n, order);
-    auto matC = HipMatrixLayout::Create(cfg.type_c, cfg.m, cfg.n, order);
-    auto matD = HipMatrixLayout::Create(cfg.type_d, cfg.m, cfg.n, order);
+    HipMatrixLayout matA(cfg.type_a, cfg.m, cfg.k, order);
+    HipMatrixLayout matB(cfg.type_b, cfg.k, cfg.n, order);
+    HipMatrixLayout matC(cfg.type_c, cfg.m, cfg.n, order);
+    HipMatrixLayout matD(cfg.type_d, cfg.m, cfg.n, order);
 
     if (cfg.epilogue == HIPBLASLT_EPILOGUE_BIAS) {
       static int dummy;
@@ -340,14 +309,8 @@ int main(int argc, char *argv[]) try
 	int m = 3, n = 2, k = 4;
   float alpha{1.0}, beta{0.0};
 
-  BlasLt blasLtObj;
-
-  // __half + float works
-  // bfloat16 + float: no valid solutions
-  // F64 - returns all zeros
-
-  using TypeA = float;//hip_bfloat16;
-  using TypeB = float;//hip_bfloat16;
+  using TypeA = hip_bfloat16;
+  using TypeB = hip_bfloat16;
   using TypeC = float;
   using TypeD = float;
 
@@ -361,7 +324,7 @@ int main(int argc, char *argv[]) try
   // using TypeC = hipDoubleComplex;
   // using TypeD = hipDoubleComplex;
 
-  size_t extra = 1000;
+  size_t extra = 0;
   MappedVector< TypeA > a(m * k + extra);
   MappedVector< TypeB > b(n * k + extra);
   MappedVector< TypeC > c(m * n + extra);
@@ -373,6 +336,7 @@ int main(int argc, char *argv[]) try
   initVec(bias.devPtr, {10.0, 11.0, 12.0});
 
   size_t max_workspace_size = 1ll << 32;
+  BlasLt blasLtObj;
   simpleGemm(GemmConfig{
     .handle = blasLtObj.get(),
     .trans_a = HIPBLAS_OP_N,
@@ -393,7 +357,7 @@ int main(int argc, char *argv[]) try
     .d_c = d.devPtr,
     .d_d = d.devPtr,
     .d_bias = bias.devPtr,
-    .epilogue = HIPBLASLT_EPILOGUE_GELU_BIAS,
+    .epilogue = HIPBLASLT_EPILOGUE_DEFAULT,
     .max_workspace_size = max_workspace_size,
     .stream = 0,
   });
