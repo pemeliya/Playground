@@ -78,6 +78,13 @@ struct HVector : std::vector< NT > {
    
    using Base = std::vector< NT >;
 
+   HVector(Base&& b) : Base(std::move(b)) {
+       CHK(cudaMalloc((void**)&devPtr, Base::size()*sizeof(NT)))
+   }
+
+   HVector(const HVector&) = delete;
+   HVector& operator=(const HVector&) = delete;
+
    HVector(std::initializer_list< NT > l) : Base(l) {
        CHK(cudaMalloc((void**)&devPtr, l.size()*sizeof(NT)))
    }

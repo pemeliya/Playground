@@ -403,6 +403,8 @@ struct BitonicTopK {
   }
 }; // BitonicTopK
 
+//__attribute__((amdgpu_flat_work_group_size(1, 256)))
+
 template <uint32_t K, typename KT>
 __launch_bounds__(1024, 1)
 __global__ void RunTopK_new(const KT * __restrict__ data, uint32_t n, 
