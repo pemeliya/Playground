@@ -3,13 +3,16 @@
 #define PLAYGROUND_COMMON_H 1
 
 #include <stdint.h>
-#include <iostream>
+#include <stdarg.h>
 #include <limits>
 #include <vector>
 
 #if COMPILE_FOR_ROCM
 #include<hip/hip_runtime.h>
 #include<hip/hip_cooperative_groups.h>
+#define cudaStream_t hipStream_t
+#define cudaEvent_t hipEvent_t
+
 #define cudaMalloc hipMalloc
 #define cudaFree hipFree
 #define cudaMemcpy hipMemcpy
@@ -27,7 +30,9 @@
 #define cudaMemGetInfo hipMemGetInfo
 #define cudaDeviceProp hipDeviceProp_t
 #define cudaGetDeviceProperties hipGetDeviceProperties
-#define cudaEvent_t hipEvent_t
+#define cudaStreamCreateWithFlags hipStreamCreateWithFlags
+#define cudaStreamCreateWithPriority hipStreamCreateWithPriority
+#define cudaStreamDestroy hipStreamDestroy
 #define cudaEventCreate hipEventCreate
 #define cudaEventDestroy hipEventDestroy
 #define cudaEventRecord hipEventRecord
@@ -35,6 +40,7 @@
 #define cudaDeviceSynchronize hipDeviceSynchronize
 #define cudaEventElapsedTime hipEventElapsedTime
 #define cudaLaunchKernel hipLaunchKernel
+#define cudaStreamDefault hipStreamDefault
 #define FORCEINLINE 
 // #include <hipcub/util_type.hpp>
 // #include <hipcub/util_allocator.hpp>
@@ -45,12 +51,12 @@
 #define FORCEINLINE __forceinline__
 #endif
 
-#define CHK(x) \
-   if(auto res = (x); res != cudaSuccess) { \
-      throw std::runtime_error(#x " failed: " + std::string(cudaGetErrorName(res)) + " at line: " + std::to_string(__LINE__)); \
-   }
-
 #define VLOG(x) std::cerr << x << std::endl;
+
+#define CHK(x) if(auto res = (x); res != cudaSuccess) { \
+  ThrowError<256>("HIP error: '%s'(%d) at %s:%d\n", cudaGetErrorString(res),  \
+                res, __FILE__, __LINE__); \
+}
 
 namespace std {
 
@@ -72,138 +78,33 @@ constexpr uint32_t bit_ceil(uint32_t n) {
 
 } // namespace std
 
-
-template < class NT >
-struct HVector : std::vector< NT > {
-   
-   using Base = std::vector< NT >;
-
-   HVector(Base&& b) : Base(std::move(b)) {
-       CHK(cudaMalloc((void**)&devPtr, Base::size()*sizeof(NT)))
-   }
-
-   HVector(const HVector&) = delete;
-   HVector& operator=(const HVector&) = delete;
-
-   HVector(std::initializer_list< NT > l) : Base(l) {
-       CHK(cudaMalloc((void**)&devPtr, l.size()*sizeof(NT)))
-   }
-   HVector(size_t N) : Base(N, NT{}) {
-       CHK(cudaMalloc((void**)&devPtr, N*sizeof(NT)))
-   }
-   void copyHToD() {
-      CHK(cudaMemcpy(devPtr, this->data(), this->size()*sizeof(NT), cudaMemcpyHostToDevice))
-   }
-   void copyDToH() {
-      CHK(cudaMemcpy(this->data(), devPtr, this->size()*sizeof(NT), cudaMemcpyDeviceToHost))
-   }
-   ~HVector() {
-      if(devPtr) {
-        (void)cudaFree(devPtr);
-      }
-   }
-   NT *devPtr = nullptr;
-};
-
-template< class NT >
-struct MappedVector {
-
-   MappedVector(size_t N_, int flags = 0) : N(N_) {
-       CHK(cudaHostAlloc((void**)&devPtr, N*sizeof(NT), flags))
-   }
-   void copyHToD() {
-   }
-   void copyDToH() {
-   }
-   size_t size() const { return N; }
-   NT *data() {
-    return devPtr;
-   }
-   const NT *data() const {
-    return devPtr;
-   }
-   NT& operator[](size_t i) {
-      return devPtr[i];
-   }
-   const NT& operator[](size_t i) const {
-      return devPtr[i];
-   }
-   ~MappedVector() {
-      (void)cudaFreeHost(devPtr);
-   }
-   size_t N;
-   NT *devPtr;
-};
-
-template <class T,
-          std::enable_if_t< !std::is_floating_point_v<T>, bool> = true >
-bool checkNaN(T) {
-    return false;
+template < uint32_t SZ >
+[[noreturn]] void ThrowError(const char *fmt, ...) {
+  static char buf[SZ];
+  va_list args;
+  va_start (args, fmt);
+  vsnprintf(buf, SZ-1, fmt, args);
+  va_end (args);
+  throw std::runtime_error(buf);
 }
 
-template <class T,
-     std::enable_if_t< std::is_floating_point_v<T>, bool> = true >
-bool checkNaN(T a) {
-    return std::isnan(a);
+template < class T >
+void initVec(T *ptr, std::initializer_list< double > l) 
+{
+  for(const auto& elem : l) {
+    *ptr++ = static_cast< T >(elem);
+  }
 }
 
-//! compares 2D arrays of data, \c width elements per row stored with \c stride (stride == width)
-//! number of rows given by \c n_batches
-//! \c print_when_differs :  indicates whether print elements only if they
-//! differ (default)
-//! \c print_max : maximal # of entries to print
-template < bool Reverse = false, class NT >
-bool checkme(const NT *checkit, const NT *truth, size_t width, size_t stride,
-        size_t n_batches, const NT& eps, bool print_when_differs = true,
-             size_t print_max = std::numeric_limits< size_t >::max()) {
-
-    if(checkit == NULL)
-        return false;
-
-    bool res = true;
-    size_t printed = 0;
-    //std::cerr << "\nlegend: batch_id (element_in_batch)\n";
-
-    int inc = Reverse ? -1 : 1;
-    size_t jbeg = 0, jend = n_batches,
-           ibeg = 0, iend = width;
-
-    if(Reverse) {
-        jbeg = n_batches - 1, jend = (size_t)-1;
-        ibeg = width - 1, iend = jend;
-    }
-
-    for(size_t j = jbeg; j != jend; j += inc) {
-
-        const NT *pcheckit = checkit + j * stride,
-            *ptruth = truth + j * stride;
-
-        for(size_t i = ibeg; i != iend; i += inc) {
-
-            bool nan1 = checkNaN(ptruth[i]), nan2 = checkNaN(pcheckit[i]);
-            if(nan1 && nan2)
-                continue;
-
-            NT diff = pcheckit[i] - ptruth[i];
-            bool isDiff = false;
-            if constexpr(std::is_floating_point_v< NT >) {
-                isDiff = std::abs(diff) > eps || nan1 || nan2;
-            } else {
-                isDiff = std::abs(std::make_signed_t<NT>(diff)) > eps;
-            }
-            if(isDiff)
-                res = false;
-
-            if((isDiff || !print_when_differs) && printed < print_max) {
-                NT check = pcheckit[i], truth = ptruth[i];
-
-                printed++;
-                std::cerr << j << '(' << i << ") (GPU, truth): " <<
-                   check << " and " << truth << " ; diff: " << diff << (isDiff ? " DIFFERS\n" : "\n");
-            }
-        }
-    }
-    return res;
+template < class T >
+void initRange(T *ptr, double start, double step, size_t n) 
+{
+  for(size_t i = 0; i < n; i++) {
+    *ptr++ = static_cast< T >(start + i*step);
+  }
 }
+
+// using caching allocator ???
+// gpuprim::CachingDeviceAllocator  g_allocator;  // Caching allocator for device memory
 
 #endif // PLAYGROUND_COMMON_H

@@ -3,7 +3,7 @@
 
 //#include "tsl/platform/bfloat16.h"
 
-#ifdef GOOGLE_CUDA
+#if !COMPILE_FOR_ROCM
 #include "cub/block/block_load.cuh"
 #include "cub/block/block_scan.cuh"
 #include "cub/block/block_store.cuh"
@@ -65,14 +65,13 @@ struct NumericTraits<tsl::bfloat16>
                  /*_NULL_TYPE=*/false, /*_UnsignedBits=*/uint16_t,
                  /*T=*/tsl::bfloat16> {};
 }  // namespace cub
-#endif
-
-#if 1
+#else // COMPILE_FOR_ROCM
 
 #include <hip/hip_runtime.h>
 #include <hipcub/util_type.hpp>
 #include <hipcub/util_allocator.hpp>
 #include <hipcub/device/device_radix_sort.hpp>
+#include <hipcub/device/device_reduce.hpp>
 
 namespace gpuprim = ::hipcub;
 
@@ -106,6 +105,6 @@ namespace detail {
 };  // namespace detail
 };  // namespace rocprim
 
-#endif  // __HIP_PLATFORM_AMD__
+#endif  // COMPILE_FOR_ROCM
 
 #endif  // XLA_SERVICE_GPU_GPU_PRIM_H_

@@ -32,6 +32,7 @@
 
 #include <vector>
 #include <cmath>
+#include <chrono>
 #include <memory.h>
 #include "common/common.h"
 #include "common/mersenne.h"
@@ -49,7 +50,7 @@ inline void DeviceInit(int dev = 0)
     CHK(cudaSetDevice(dev));
 
     std::size_t device_free_physmem = 0, device_total_physmem = 0;
-    CHK(cudaMemGetInfo(&device_free_physmem, &device_total_physmem));
+    (void)cudaMemGetInfo(&device_free_physmem, &device_total_physmem); // this fails on rocm-5.7.0
 
     cudaDeviceProp deviceProp;
 
@@ -60,6 +61,7 @@ inline void DeviceInit(int dev = 0)
 
     auto device_giga_bandwidth = float(deviceProp.memoryBusWidth) * deviceProp.memoryClockRate * 2 / 8 / 1000 / 1000;
     {
+        //printf("%llu --- %llu\n", device_free_physmem, device_total_physmem);
         printf("Using device %d: %s ( SM%d, %d SMs, "
                         "%lld free / %lld total MB physmem, "
                         "%.3f GB/s @ %d kHz mem clock, ECC %s)\n",
@@ -112,6 +114,96 @@ public:
     }
 };
 
+template < class NT >
+struct HVector : std::vector< NT > {
+   
+   using Base = std::vector< NT >;
+
+   HVector(Base&& b) : Base(std::move(b)) {
+       CHK(cudaMalloc((void**)&devPtr, Base::size()*sizeof(NT)))
+   }
+
+   HVector(const HVector&) = delete;
+   HVector& operator=(const HVector&) = delete;
+
+   HVector(std::initializer_list< NT > l) : Base(l) {
+       CHK(cudaMalloc((void**)&devPtr, l.size()*sizeof(NT)))
+   }
+   HVector(size_t N) : Base(N, NT{}) {
+       CHK(cudaMalloc((void**)&devPtr, N*sizeof(NT)))
+   }
+   void copyHToD() {
+      CHK(cudaMemcpy(devPtr, this->data(), this->size()*sizeof(NT), cudaMemcpyHostToDevice))
+   }
+   void copyDToH() {
+      CHK(cudaMemcpy(this->data(), devPtr, this->size()*sizeof(NT), cudaMemcpyDeviceToHost))
+   }
+   ~HVector() {
+      if(devPtr) {
+        (void)cudaFree(devPtr);
+      }
+   }
+   NT *devPtr = nullptr;
+};
+
+template< class NT >
+struct MappedVector {
+
+   MappedVector(size_t N_, int flags = 0) : N(N_) {
+       CHK(cudaHostAlloc((void**)&devPtr, N*sizeof(NT), flags))
+   }
+   void copyHToD() {
+   }
+   void copyDToH() {
+   }
+   size_t size() const { return N; }
+   NT *data() {
+    return devPtr;
+   }
+   const NT *data() const {
+    return devPtr;
+   }
+   NT& operator[](size_t i) {
+      return devPtr[i];
+   }
+   const NT& operator[](size_t i) const {
+      return devPtr[i];
+   }
+   ~MappedVector() {
+      (void)cudaFreeHost(devPtr);
+   }
+   size_t N;
+   NT *devPtr;
+};
+
+struct GPUStream {
+
+  explicit GPUStream(int priority = 0) 
+  {
+    if (priority == 0) {
+      CHK(cudaStreamCreateWithFlags(&handle_, cudaStreamDefault)) 
+    } else {
+      CHK(cudaStreamCreateWithPriority(&handle_, cudaStreamDefault, priority))
+    }
+  }
+  cudaStream_t get() const {
+    return handle_;
+  }
+  ~GPUStream() {
+    (void)cudaStreamDestroy(handle_);
+  }
+private:
+  cudaStream_t handle_;
+};
+
+#define CPU_BEGIN_TIMING(ID) \
+        auto z1_##ID = std::chrono::high_resolution_clock::now()
+
+#define CPU_END_TIMING(ID, fmt, ...)                                                    \
+        auto z2_##ID = std::chrono::high_resolution_clock::now();              \
+        std::chrono::duration<double, std::milli> ms_##ID = z2_##ID - z1_##ID; \
+        fprintf(stderr, "%s: " fmt " elapsed: %f msec\n", #ID, ##__VA_ARGS__, ms_##ID.count())
+
 #define CU_BEGIN_TIMING(N_ITERS) { \
     (void)cudaDeviceSynchronize();       \
     GpuTimer timer;                 \
@@ -129,6 +221,63 @@ public:
     if(nIters > 0) ms /= nIters;                        \
     fprintf(stderr, fmt "; time elapsed: %.3f ms\n", ##__VA_ARGS__, ms); \
     }
+
+//! compares 2D arrays of data, \c width elements per row stored with \c stride (stride == width)
+//! number of rows given by \c n_batches
+//! \c print_when_differs :  indicates whether print elements only if they differ (default)
+//! \c print_max : maximal # of entries to print
+template < bool Reverse = false, class NT >
+bool checkme(const NT *checkit, const NT *truth, size_t width, size_t stride,
+        size_t n_batches, const NT& eps, bool print_when_differs = true,
+             size_t print_max = std::numeric_limits< size_t >::max()) {
+
+    if(checkit == NULL)
+        return false;
+
+    bool res = true;
+    size_t printed = 0;
+    //std::cerr << "\nlegend: batch_id (element_in_batch)\n";
+
+    int inc = Reverse ? -1 : 1;
+    size_t jbeg = 0, jend = n_batches,
+           ibeg = 0, iend = width;
+
+    if(Reverse) {
+        jbeg = n_batches - 1, jend = (size_t)-1;
+        ibeg = width - 1, iend = jend;
+    }
+
+    for(size_t j = jbeg; j != jend; j += inc) {
+
+        const NT *pcheckit = checkit + j * stride,
+            *ptruth = truth + j * stride;
+
+        for(size_t i = ibeg; i != iend; i += inc) {
+            
+            NT diff = pcheckit[i] - ptruth[i];
+            bool isDiff = false;
+            if constexpr(std::is_floating_point_v< NT >) {
+                bool nan1 = std::isnan(ptruth[i]), nan2 = std::isnan(pcheckit[i]);
+                if(nan1 && nan2)
+                  continue;
+                isDiff = std::abs(diff) > eps || nan1 || nan2;
+            } else {
+                isDiff = std::abs(std::make_signed_t<NT>(diff)) > eps;
+            }
+            if(isDiff)
+                res = false;
+
+            if((isDiff || !print_when_differs) && printed < print_max) {
+                NT check = pcheckit[i], truth = ptruth[i];
+
+                printed++;
+                std::cerr << j << '(' << i << ") (GPU, truth): " <<
+                   check << " and " << truth << " ; diff: " << diff << (isDiff ? " DIFFERS\n" : "\n");
+            }
+        }
+    }
+    return res;
+}
 
 template <typename K>
 void RandomBits(
