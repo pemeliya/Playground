@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <iomanip>
+#include <iostream>
 #include <numeric>
 #include <random>
 #include "common/example_utils.hpp"

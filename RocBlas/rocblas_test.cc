@@ -4,6 +4,7 @@
 
 // https://github.com/ROCmSoftwarePlatform/rocBLAS-Examples/blob/develop/Extensions/gemm_ex_f16_r/gemm_ex_f16_r.cpp
 
+#define ROCBLAS_BETA_FEATURES_API
 #include <hip/hip_fp16.h>
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_complex.h>
@@ -122,6 +123,23 @@ struct BlasGemm
     return (rocblas_datatype)-1;
   }
 
+  template < class TypeA, class TypeD, class Scalar >
+  auto get_solutions_by_type(const TypeA *dA, TypeD *dD, Scalar alpha) {
+
+    int num_sols = 0;
+    CHK_ROCBLAS(rocblas_gemm_ex_get_solutions_by_type(
+      handle_, RocBlasType(dA), RocBlasType(dD), 
+          RocBlasType(&alpha), 0, nullptr, &num_sols));
+
+    std::vector< int32_t > sols(num_sols);
+    VLOG("Found solutions: " << num_sols);
+
+    CHK_ROCBLAS(rocblas_gemm_ex_get_solutions_by_type(
+      handle_, RocBlasType(dA), RocBlasType(dD), 
+          RocBlasType(&alpha), 0, sols.data(), &num_sols));
+    return sols;
+  }
+
   template < class TypeA, class TypeB, class TypeC, class TypeD, class Scalar >
   void gemm_strided_batched_ex(const TypeA *dA, const TypeB *dB, const TypeC *dC, 
       TypeD *dD, Scalar alpha, Scalar beta, const Config& cfg) {
@@ -157,19 +175,25 @@ private:
 
 int main(int argc, char *argv[]) try
 {
-  using TypeA = __half;
-  using TypeB = __half;
+  using TypeA = float;
+  using TypeB = float;
   using TypeC = float;
   using TypeD = float;
 
-	int M = 5000, N = 512, K = 30000;
+	int M = 600, N = 512, K = 300;
   auto transA = rocblas_operation_transpose,
        transB = rocblas_operation_none;
   TypeD alpha{1}, beta{0};
 
-  int64_t batchCount = USE_BATCHED_GEMM ? 500 : 1;
+  int64_t batchCount = USE_BATCHED_GEMM ? 1000 : 1;
   BlasGemm gemm;
   auto cfg = gemm.FillParams(M, N, K, transA, transB, batchCount);
+
+  // int32_t num_sols = 0;
+  // rocblas_handle H;
+  // rocblas_gemm_ex_get_solutions_by_type(H, 
+  //        rocblas_datatype_f32_r, rocblas_datatype_f32_r, 
+  //       rocblas_datatype_f32_r, 0, nullptr, &num_sols);
   
   size_t totalA = cfg.sizeA * batchCount,
          totalB = cfg.sizeB * batchCount,
@@ -192,32 +216,45 @@ int main(int argc, char *argv[]) try
   int ofs = 5, mod = 8;
   uint32_t minT = 1000000, maxT = 0;
   //for(int i = 0; i < 10; i++) {
-  for(int m = M - ofs, z = 0; m <= M; m++) 
-  for(int n = N - ofs; n <= N; n++) 
-  for(int k = K - ofs; k <= K; k++, z++) {
+  // for(int m = M - ofs, z = 0; m <= M; m++) 
+  // for(int n = N - ofs; n <= N; n++) 
+  // for(int k = K - ofs; k <= K; k++, z++) {
 
-    int zM = m & 1, zN = n & 1, zK = k & 1;
-    int oddM = m % mod, oddN = n % mod, oddK = k % mod;
+    //int zM = m & 1, zN = n & 1, zK = k & 1;
+    //int oddM = m % mod, oddN = n % mod, oddK = k % mod;
     cfg = gemm.FillParams(M, N, K, transA, transB, batchCount);
     // if(oddM + oddN + oddK > 1)
     //   continue;
 
 #if !USE_BATCHED_GEMM
-  CPU_BEGIN_TIMING(gemm);    
+  //CPU_BEGIN_TIMING(gemm);    
 
-  gemm.gemm_ex(a.devPtr, b.devPtr, c.devPtr, d.devPtr, 
+  auto sols = gemm.get_solutions_by_type(a.devPtr, d.devPtr, alpha);
+  
+  //for(int sol = 0; sol < 100000; sol++) 
+  for(auto sol : sols)
+  try {
+    cfg.solutionIndex = sol;
+    cfg.algo = rocblas_gemm_algo_solution_index;
+    gemm.gemm_ex(a.devPtr, b.devPtr, c.devPtr, d.devPtr, 
        alpha, beta, cfg);
+   VLOG("Testing with sol: " << sol << " succeeded!");
+  }
+  catch(std::exception& ex) {
+    //VLOG("Failed: " << ex.what());
+  }
 
   d.copyDToH();
-  CPU_END_TIMING(gemm, "iter %d: %d x %d x %d", z, m, n, k);
+  //CPU_END_TIMING(gemm, "iter %d: %d x %d x %d", z, m, n, k);
 #else // USE_BATCHED_GEMM
   CPU_BEGIN_TIMING(gemm_batched);    
   gemm.gemm_strided_batched_ex(a.devPtr, b.devPtr, c.devPtr, d.devPtr, 
        alpha, beta, cfg);
   d.copyDToH();
-  CPU_END_TIMING(gemm_batched, "iter %d: %d x %d x %d", z, m, n, k);
+  CPU_END_TIMING(gemm_batched, "iter %d: batch: %d, %d x %d x %d", z, 
+      batchCount, m, n, k);
 #endif // USE_BATCHED_GEMM
-  } // for
+//  } // for
 
 #if 0
   for(int i = 0; i < batchCount; i++) {
