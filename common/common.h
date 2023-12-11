@@ -55,7 +55,7 @@
 #define VLOG(x) std::cerr << x << std::endl;
 
 #define CHK(x) if(auto res = (x); res != cudaSuccess) { \
-  ThrowError<256>("HIP error: '%s'(%d) at %s:%d\n", cudaGetErrorString(res),  \
+  ThrowError<256>(#x " failed with: '%s'(%d) at %s:%d\n", cudaGetErrorString(res),  \
                 res, __FILE__, __LINE__); \
 }
 

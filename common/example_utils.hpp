@@ -50,7 +50,7 @@ inline void DeviceInit(int dev = 0)
     CHK(cudaSetDevice(dev));
 
     std::size_t device_free_physmem = 0, device_total_physmem = 0;
-    (void)cudaMemGetInfo(&device_free_physmem, &device_total_physmem); // this fails on rocm-5.7.0
+    CHK(cudaMemGetInfo(&device_free_physmem, &device_total_physmem)); // this fails on rocm-5.7.0
 
     cudaDeviceProp deviceProp;
 
