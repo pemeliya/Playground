@@ -7,7 +7,7 @@ cmake_minimum_required(VERSION 3.12)
 
 project(topk)
 
-set(COMPILE_FOR_ROCM 1)
+set(COMPILE_FOR_ROCM 0)
 
 set(CMAKE_VERBOSE_MAKEFILE ON)
 set(CMAKE_CXX_STANDARD 20)
@@ -37,12 +37,12 @@ if(NOT ${COMPILE_FOR_ROCM})
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -std=c++17 -Xcuda-ptxas -v --cuda-gpu-arch=sm_70")
     set_source_files_properties(${GPU_SRC} PROPERTIES LANGUAGE CUDA)
 else()
-    #list(APPEND CMAKE_PREFIX_PATH "/opt/rocm-5.6.0/lib/cmake/AMDDeviceLibs")
-    #list(APPEND CMAKE_PREFIX_PATH "/opt/rocm-5.6.0/lib/cmake/amd_comgr")
-    list(APPEND CMAKE_MODULE_PATH "/opt/rocm-5.6.0/lib/cmake/hip") 
+    #list(APPEND CMAKE_PREFIX_PATH "/opt/rocm/lib/cmake/AMDDeviceLibs")
+    #list(APPEND CMAKE_PREFIX_PATH "/opt/rocm/lib/cmake/amd_comgr")
+    list(APPEND CMAKE_MODULE_PATH "/opt/rocm/lib/cmake/hip") 
     #to be added to hip-lang-config.cmake:
-    #find_dependency(AMDDeviceLibs REQUIRED PATHS "/opt/rocm-5.6.0/lib/cmake/AMDDeviceLibs")
-    #find_dependency(amd_comgr REQUIRED PATHS "/opt/rocm-5.6.0/lib/cmake/amd_comgr")
+    #find_dependency(AMDDeviceLibs REQUIRED PATHS "/opt/rocm/lib/cmake/AMDDeviceLibs")
+    #find_dependency(amd_comgr REQUIRED PATHS "/opt/rocm/lib/cmake/amd_comgr")
 
     enable_language(HIP) 
     find_package(HIP REQUIRED)
@@ -79,11 +79,11 @@ if(NOT ${COMPILE_FOR_ROCM})
 #    COMMAND ${CUDA_TOOLKIT_ROOT_DIR}/bin/nvdisasm -ndf ${TARGET_BIN}
 #    WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
 #)
-# add_custom_command(TARGET ${PROJECT_NAME}
-#     POST_BUILD
-#     COMMAND ${CUDA_TOOLKIT_ROOT_DIR}/bin/cuobjdump -sass ${TARGET_BIN}
-#     WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
-# )
+add_custom_command(TARGET ${PROJECT_NAME}
+    POST_BUILD
+    COMMAND ${CUDA_TOOLKIT_ROOT_DIR}/bin/cuobjdump -sass ${TARGET_BIN}
+    WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
+)
 #add_custom_command(TARGET ${PROJECT_NAME}
 #    POST_BUILD
 #    COMMAND ${CUDA_TOOLKIT_ROOT_DIR}/bin/cuda-memcheck.exe --print-level info ${TARGET_BIN}

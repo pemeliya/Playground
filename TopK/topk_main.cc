@@ -3,6 +3,7 @@
 #include <stdexcept>
 #include <bit>
 #include <numeric>
+#include <iostream>
 #include <random>
 #include "topk_kernel.h"
 #include "common/example_utils.hpp"
@@ -59,21 +60,22 @@ void TypedTopK(TopkArgs<T> args)
   constexpr size_t max_kv_size = sizeof(uint64_t);
   // Allocate shmem assuming we have a full reduction.
 #if USE_TOPK_DEFAULT  
-  uint32_t shmem_size = std::bit_ceil(args.k) * max_kv_size * 64;
+  uint32_t shmem_size = std::bit_ceil(args.k) * max_kv_size * WAVEFRONT_SIZE;
 #else  
-  num_threads = 1024;
+  //num_threads = 1024;
+  num_threads = args.num_elements / std::bit_ceil(args.k);
+  num_threads = (num_threads + WAVEFRONT_SIZE - 1) & ~(WAVEFRONT_SIZE - 1);
   uint32_t shmem_size = num_threads * sizeof(max_kv_size) / 2;
 #endif
-  uint32_t slice_size = (args.num_elements + num_threads-1) / num_threads;
   VLOG("Testing N = " << args.num_elements << "; K = " << args.k <<
           "; batch_size: " << args.batch_size << 
           "; n_blocks: " << blocks_per_grid << "; shmem_size: " << shmem_size
-        << " num_threads: " << num_threads << " slice_size: " << slice_size);
+        << " num_threads: " << num_threads);
 
   void* kernel_args[] = {&args.data, &args.num_elements, &args.top_elements,
                          &args.top_indices, &args.k};
   
-  CU_BEGIN_TIMING(5)
+  CU_BEGIN_TIMING(0)
   (void)cudaLaunchKernel(kernel, blocks_per_grid, num_threads, kernel_args,
                        shmem_size, 0);
   CU_END_TIMING("TopK N = %zu; K = %zu; batch_size: %zu", 
@@ -144,8 +146,7 @@ int main() try
 {
   DeviceInit();
 
-  benchmark_topk< uint32_t >(1024, 
-                            1024*1024, 16, false);
+  benchmark_topk< uint32_t >(1, 1024*2, 16, false);
   return 0;
 
   //size_t batch_size, size_t N, size_t K

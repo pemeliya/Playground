@@ -13,17 +13,6 @@
 #include <cstdint>
 #include <limits>
 
-#if COMPILE_FOR_ROCM  // warp size is 64 for ROCM
-#ifndef __AMDGCN_WAVEFRONT_SIZE
-#error Wavefront size is not defined! Please use HIPCC compiler!
-#else
-#define WAVEFRONT_SIZE __AMDGCN_WAVEFRONT_SIZE
-#endif
-#else // NVIDIA
-#define WAVEFRONT_SIZE 32 
-#endif
-
-
 /*
 /opt/rocm/include/hip/amd_detail/amd_warp_functions.h:
 static constexpr int warpSize = __AMDGCN_WAVEFRONT_SIZE;
@@ -132,7 +121,6 @@ __device__ FORCEINLINE uint32_t Idx(uint32_t i) {
     }
   }
 
-//! Gt: return lhs.k_ == rhs.k_ ? lhs.v_ < rhs.v_ : lhs.k_ > rhs.k_;
   // Given a K-array of previously reverse-sorted KVTs, add kv to it and
   // remove the smallest element of the resulting array. Preserves the sorted
   // order of `tmp`.
@@ -177,39 +165,6 @@ __launch_bounds__(1024, 1) __global__
  
   obj.PerWarpTopK(in, slice_size);
   obj.MergeTopKs(vals_out, idxs_out);
-}
-
-template <class NT >
-__device__ void bitonic_warp_sort(uint32_t lane, NT& d)
-{
-  constexpr uint32_t WarpSize = WAVEFRONT_SIZE;
-#pragma unroll  
-  for(int32_t i = 2; i < WarpSize; i *= 2) {
-    int32_t biti = (lane & i) == i; // // __builtin_amdgcn_ubfe ??
-#pragma unroll    
-    for(int32_t j = i / 2; j >= 1; j /= 2) {
-      int32_t bitj = (lane & j) == j;
-      auto xd = gpuShuffle< ShflType::Xor >(d, j); 
-      if((biti ^ bitj ^ (d < xd)) == 0) {
-        d = xd;
-      }
-    }
-    // after step i, we have bitonic sequences of size i*2
-    // i.e., after the whole loop we have a bitonic sequence of WarpSize
-    // if (bit1 == 0) { // sort min <-- max
-    //   d = (bit0 == 0) ? min(d, xd) : max(d, xd);
-    // } else { // sort max <-- min
-    //   d = (bit0 == 0) ? max(d, xd) : min(d, xd);
-    // }
-  }
-#pragma unroll  
-  for(int32_t i = WarpSize/2; i >= 1; i /= 2) {
-    int32_t biti = (lane & i) == i;
-    auto xd = gpuShuffle< ShflType::Xor >(d, i); 
-    if((biti ^ (d < xd)) == 0) {
-      d = xd;
-    }
-  }
 }
 
 constexpr uint32_t log2xN(uint32_t x) {
@@ -401,6 +356,68 @@ struct BitonicTopK {
       }
     } // if(warpId)  
   }
+
+  __device__ inline uint32_t GpuLaneId() {
+    uint32_t lane_id;
+#if !COMPILE_FOR_ROCM
+#if __clang__
+    return __nvvm_read_ptx_sreg_laneid();
+#else   // __clang__
+    asm("mov.u32 %0, %%laneid;" : "=r"(lane_id));
+#endif  // __clang__
+#else
+    lane_id = __lane_id();
+#endif
+  return lane_id;
+}
+  template <class NT>
+  __device__ FORCEINLINE void xswap(NT& a, NT& b) {
+    auto c = a;
+    a = b, b = c;
+  }
+
+  template <class NT>
+  __device__ FORCEINLINE void local_sort_regs(NT (&A)[K])
+  {
+    int uu = 0;
+#pragma unroll
+  // this produces sequences of length K: alternating ascending - descending
+    for(int32_t i = 2; i < K; i *= 2) { // less than K since the last step is not needed
+#pragma unroll    
+      for(int32_t j = i / 2; j >= 1; j /= 2) {
+    // after step i, we have bitonic sequences of size i*2
+    // i.e., after the whole loop we have a bitonic sequence of WarpSize
+    // if (bit1 == 0) { // sort min <-- max
+    //   d = (bit0 == 0) ? min(d, xd) : max(d, xd);
+    // } else { // sort max <-- min
+    //   d = (bit0 == 0) ? max(d, xd) : min(d, xd);
+    // }
+#pragma unroll
+        for(int32_t k = 0; k < K; k++) {
+          if((k & j) == 0) {
+            int32_t k2 = k ^ j, biti = (k & i) == i;
+            if((biti ^ (A[k] < A[k2])) == 0){
+              xswap(A[k], A[k2]);
+            }
+          }
+        } // for k
+      } // for j
+    } // for i
+#pragma unroll
+    for(int32_t i = K/2; i >= 1; i /= 2) {
+#pragma unroll      
+      for(int32_t k = 0; k < K; k++) {
+        if((k & i) == 0) {
+          int32_t k2 = k ^ i;
+          if(!(A[k] < A[k2])) {
+            xswap(A[k], A[k2]);
+          }
+        }
+      } // for k
+    } // for i
+    // 120 comparisons vs 80 comparision for bitonic topK
+  }
+
 }; // BitonicTopK
 
 //__attribute__((amdgpu_flat_work_group_size(1, 256)))
@@ -413,8 +430,84 @@ __global__ void RunTopK_new(const KT * __restrict__ data, uint32_t n,
   BitonicTopK< K, KT >()(data, n, result, result_idxs, k);
 }
 
+template <class NT >
+__device__ void bitonic_warp_sort(uint32_t lane, NT& d)
+{
+  constexpr uint32_t WarpSize = WAVEFRONT_SIZE;
+#pragma unroll  
+  for(int32_t i = 2; i < WarpSize; i *= 2) {
+    int32_t biti = (lane & i) == i; // // __builtin_amdgcn_ubfe ??
+#pragma unroll    
+    for(int32_t j = i / 2; j >= 1; j /= 2) {
+      int32_t bitj = (lane & j) == j;
+      auto xd = gpuShuffle< ShflType::Xor >(d, j); 
+      if((biti ^ bitj ^ (d < xd)) == 0) {
+        d = xd;
+      }
+    }
+    // after step i, we have bitonic sequences of size i*2
+    // i.e., after the whole loop we have a bitonic sequence of WarpSize
+    // if (bit1 == 0) { // sort min <-- max
+    //   d = (bit0 == 0) ? min(d, xd) : max(d, xd);
+    // } else { // sort max <-- min
+    //   d = (bit0 == 0) ? max(d, xd) : min(d, xd);
+    // }
+  }
+#pragma unroll  
+  for(int32_t i = WarpSize/2; i >= 1; i /= 2) {
+    int32_t biti = (lane & i) == i;
+    auto xd = gpuShuffle< ShflType::Xor >(d, i); 
+    if((biti ^ (d < xd)) == 0) {
+      d = xd;
+    }
+  }
+}
+
+template <uint32_t K__, typename KT>
+__global__ void RunTopK_registers(const KT * __restrict__ data, uint32_t n, 
+    KT * __restrict__ result, uint32_t * __restrict__ result_idxs, uint32_t k) 
+{
+  // each thread works on 16 elements, hence one warp - 1024 elements
+  using VecT = uint4;
+  constexpr uint32_t K = 16, Nloads = K * sizeof(KT) / sizeof(VecT),
+        zzz = warpSize;
+  uint32_t thid = threadIdx.x, blockSz = blockDim.x;
+
+  // block is 64 threads: 64*16 -> 1024 elements to read
+  // read 4 elements by each thread: total 4 * BlockSize
+
+  // uint4 - 4 32-bit ints or 8 16-bit values
+  KT regs[K];
+  for(uint32_t i = 0; i < K; i++) {
+    regs[i] = (i+1)*(i+1)*(i+1)*1223 % 19; 
+    if(thid == 0) {
+      OUTZ("%d orig: %d", i, regs[i]);
+    }
+  }
+
+// #pragma unroll
+//   for(uint32_t i = 0, ofs = 0; i < Nloads; i++, ofs += blockSz) {
+//     ((VecT *)regs)[i] = ((const VecT * __restrict__ )data)[ofs + thid];
+//   }
+
+  BitonicTopK< K, KT > topk;
+  
+  if(thid == 0) {
+    topk.local_sort_regs(regs);
+    for(uint32_t i = 0; i < K; i++) {
+      OUTZ("%d sorted: %d", i, regs[i]);
+    }
+  }
+  
+
+  //OUTZ("NLoads = %d", Nloads);
+
+  //if(thid == 0)
+  //result[thid] = z;
+}
+
 template <typename KT>
-__global__ void RunTopK_test(KT* data, int n, KT* result, uint32_t* result_idxs, int k) 
+__global__ void RunTopK_test(KT* data, uint32_t n, KT* result, uint32_t* result_idxs, uint32_t k) 
 {
   constexpr uint32_t WarpSize = WAVEFRONT_SIZE;
   uint32_t lane = threadIdx.x;
@@ -499,7 +592,8 @@ void* GetTopKKernelForK(size_t n_threads) {
 #if USE_TOPK_DEFAULT
   return reinterpret_cast<void*>(RunTopK_default<K, T>);
 #else  
-  return reinterpret_cast<void*>(RunTopK_new<K, T>);
+  return reinterpret_cast<void*>(RunTopK_registers<K, T>);
+  //return reinterpret_cast<void*>(RunTopK_new<K, T>);
           //RunTopK_test<T>);
 #endif
 }

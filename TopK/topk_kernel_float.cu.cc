@@ -22,5 +22,5 @@ limitations under the License.
 // template void* GetTopKKernelForK<float, 8>(size_t n_threads);
 //template void* GetTopKKernelForK<float, 16>(size_t n_threads);
 
-template void* GetTopKKernelForK<uint32_t, 8>(size_t n_threads);
+//template void* GetTopKKernelForK<uint32_t, 8>(size_t n_threads);
 template void* GetTopKKernelForK<uint32_t, 16>(size_t n_threads);

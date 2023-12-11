@@ -6,6 +6,7 @@
 #include <stdarg.h>
 #include <limits>
 #include <vector>
+#include <stdexcept>
 
 #if COMPILE_FOR_ROCM
 #include<hip/hip_runtime.h>

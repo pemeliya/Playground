@@ -19,6 +19,16 @@ limitations under the License.
 #include <stddef.h>
 #include <stdint.h>
 
+#if COMPILE_FOR_ROCM  // warp size is 64 for ROCM
+#ifndef __AMDGCN_WAVEFRONT_SIZE
+#error Wavefront size is not defined! Please use HIPCC compiler!
+#else
+#define WAVEFRONT_SIZE __AMDGCN_WAVEFRONT_SIZE
+#endif
+#else // NVIDIA
+#define WAVEFRONT_SIZE 32 
+#endif
+
 #define USE_TOPK_DEFAULT 0
 
 constexpr size_t kTopKMaxThreadsPerBlock = 1024;
@@ -31,7 +41,7 @@ void* GetKernel(size_t n_threads, size_t k) {
   // if (k <= 1) return GetTopKKernelForK<T, 1>(n_threads);
   // if (k <= 2) return GetTopKKernelForK<T, 2>(n_threads);
   // if (k <= 4) return GetTopKKernelForK<T, 4>(n_threads);
-  if (k <= 8) return GetTopKKernelForK<T, 8>(n_threads);
+  //if (k <= 8) return GetTopKKernelForK<T, 8>(n_threads);
   if (k <= 16) return GetTopKKernelForK<T, 16>(n_threads);
   return nullptr;
 }
