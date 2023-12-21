@@ -61,9 +61,9 @@ void TypedTopK(TopkArgs<T> args)
   // Allocate shmem assuming we have a full reduction.
 #if USE_TOPK_DEFAULT  
   uint32_t shmem_size = std::bit_ceil(args.k) * max_kv_size * WAVEFRONT_SIZE;
-#else  
-  //num_threads = 1024;
-  num_threads = args.num_elements / std::bit_ceil(args.k);
+#else
+  //num_threads = args.num_elements / std::bit_ceil(args.k);
+  num_threads = 32;
   num_threads = (num_threads + WAVEFRONT_SIZE - 1) & ~(WAVEFRONT_SIZE - 1);
   uint32_t shmem_size = num_threads * sizeof(max_kv_size) / 2;
 #endif
