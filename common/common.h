@@ -42,7 +42,7 @@
 #define cudaEventElapsedTime hipEventElapsedTime
 #define cudaLaunchKernel hipLaunchKernel
 #define cudaStreamDefault hipStreamDefault
-#define FORCEINLINE 
+#define FORCEINLINE inline
 // #include <hipcub/util_type.hpp>
 // #include <hipcub/util_allocator.hpp>
 // #include <hipcub/iterator/discard_output_iterator.hpp>

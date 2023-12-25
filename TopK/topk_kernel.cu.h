@@ -28,9 +28,9 @@ int __shfl_xor(int var, int lane_mask, int width = warpSize) {
 */
 
 #define OUTZ(fmt, ...) printf(fmt"\n", ##__VA_ARGS__)
-#define OUTREGSZ(fmt, ...) \
-    for(uint32_t i = 0; i < N; i++) { \
-      printf(fmt"\n", ##__VA_ARGS__); \
+#define OUTREGSZ(SZ, fmt, ...) \
+    for(uint32_t i = 0; i < SZ; i++) { \
+      printf("%d: " fmt "\n", i, ##__VA_ARGS__); \
     }
 #define LOUTZ(fmt, ...) printf("%d :" fmt "\n", lane, ##__VA_ARGS__)
 
@@ -224,8 +224,8 @@ struct BitonicTopK {
 
   // local sort produces sorted runs of size K: ascending / descending
   // i.e. for K = 4: [3 5 8 9; 5 3 1 1; 2 5 6 10; 11 4 3 2]
-  template <class NT>
-  __device__ FORCEINLINE void local_sort(NT& A) 
+  template <uint32_t B, class NT> // B >= I
+  __device__ FORCEINLINE void local_sort(NT (&A)[B], uint32_t I)
   {
     auto lane = gpuLaneId();
     // this produces sequences of length K: alternating ascending - descending
@@ -238,10 +238,13 @@ struct BitonicTopK {
       // i == 8: j = 4, 2, 1
 #pragma unroll
       for(int32_t j = i - 1; j >= 0; j--) {
-        int32_t bitj = gpuGetBit(lane, j);
-        auto xA = gpuShuffle< ShflType::Xor >(A, 1u << j); 
-        if((biti ^ bitj ^ (A < xA)) == 0) {
-          A = xA;
+        int32_t bit = biti ^ gpuGetBit(lane, j);
+#pragma unroll
+        for(uint32_t v = 0; v < I; v++) {
+          auto xA = gpuShuffle< ShflType::Xor >(A[v], 1u << j); 
+          if((bit ^ (A[v] < xA)) == 0) {
+            A[v] = xA;
+          }
         }
       } // for j
     } // for i
@@ -254,37 +257,57 @@ struct BitonicTopK {
     A = A < xA ? xA : A;
   }
 
-  template <class NT>
-  __device__ FORCEINLINE void rebuild(NT& A) 
+    template <class NT>
+  __device__ FORCEINLINE void merge(NT& A, NT& B) 
+  {
+      constexpr uint32_t WarpSize = WAVEFRONT_SIZE;
+      const auto lane = gpuLaneId();
+      if constexpr(K < WarpSize) {
+        // merge K-sorted runs and keep only K greater elements
+        merge(A);
+        merge(B); 
+        // e.g. K = 4, WarpSize = 16
+        // lane =     0123 4567 89AB CDEF
+        // A =        ABCD ABCD MNPQ MNPQ
+        // B =        IJKL IJKL UWXY UWXY  
+        // merged A = ABCD IJKL MNPQ UWXY
+        // but this does not work when K == WarpSize
+        // merge maximal elements of A and B: shift B by K elements
+        // B[lane] = B[lane - K]
+        if(lane & K) {
+          A = B;
+        }
+      } else { // A & B are just two ascending sequences => merge directly
+        // 0 - 31, 1 - 30
+        // 0 4
+        // 1 3
+        // 2 2
+        // 3 1
+        // 4 0
+        // sync wraps around
+        B = gpuShuffle< ShflType::Sync >(B, WarpSize - 1 - lane); 
+        A = A < B ? B : A;
+      }
+  }
+
+  template <uint32_t B, class NT>
+  __device__ FORCEINLINE void rebuild(NT (&A)[B], uint32_t I)
   {
     auto lane = gpuLaneId();
     // rebuild bitonic sequences of length K to sorted ones
     int32_t bitK = gpuGetBit(lane, logK); 
 #pragma unroll
     for(int32_t j = logK - 1; j >= 0; j--) {
-      int32_t bitj = gpuGetBit(lane, j);
+      int32_t bit = bitK ^ gpuGetBit(lane, j); // we can save on 'gpuGetBit' !
       // src = lane ^ (1u << j);
-      auto xA = gpuShuffle< ShflType::Xor >(A, 1u << j); 
-      if((bitK ^ bitj ^ (A < xA)) == 0) {
-        A = xA;
+#pragma unroll      
+      for(uint32_t v = 0; v < I; v++) {
+        auto xA = gpuShuffle< ShflType::Xor >(A[v], 1u << j); 
+        if((bit ^ (A[v] < xA)) == 0) {
+          A[v] = xA;
+        }
       }
     }
-  }
-
-  template <class NT>
-  __device__ FORCEINLINE void merge(NT& A, NT& B) 
-  {
-      // merge K-sorted runs and keep only K greater elements
-      merge(A);
-      merge(B);
-      // merge maximal elements of A and B: shift B by K elements
-      // A: ABCD xxxx EFGH xxxx IJKL xxxx
-      // B: xxxx ABCD xxxx EFGH xxxx IJKL 
-      // B[lane] = B[lane - K]
-      auto lane = gpuLaneId();
-      if(lane & K) {
-        A = B;
-      }
   }
 
   __device__ void operator()(const KT * __restrict__ data, uint32_t n, 
@@ -485,45 +508,81 @@ __global__ void RunTopK_new(const KT * __restrict__ data, uint32_t n,
   BitonicTopK< KT, K >()(data, n, result, result_idxs, k);
 }
 
+// B - number of top elements which are searched for each subrange [1,2,3,4]
+// this also defines the minimal number of registers per thread
+// K - next power-of-two value of K for top-k (real k <= K)
+// for small K: K == B
+
+// this function emulates loading ith data element from global memory
+template <typename KT>
+__device__ KT loadData(uint32_t thid, uint32_t i) {
+  auto u = i + 13, v = thid - 11711;
+  KT x = u*u*v*v % 259; 
+  return x;
+}
+
 template <uint32_t K__, typename KT>
 __global__ void RunTopK_subranges(const KT * __restrict__ data, uint32_t n, 
     KT * __restrict__ result, uint32_t * __restrict__ result_idxs, uint32_t k) 
 {
   // each thread works on 16 elements, hence one warp - 1024 elements
   using VecT = uint4;
-  constexpr uint32_t K = 16, Nloads = K * sizeof(KT) / sizeof(VecT);
+  constexpr uint32_t K = 32, Nloads = K * sizeof(KT) / sizeof(VecT);
   uint32_t thid = threadIdx.x, blockSz = blockDim.x;
 
   // block is 64 threads: 64*16 -> 1024 elements to read
   // read 4 elements by each thread: total 4 * BlockSize
 
-  constexpr uint32_t N = K;
+  constexpr uint32_t B = 1, N = 8;
+  const uint32_t sliceSz = 32; // subrange size processed by each thread
   using TopKType = BitonicTopK< KT, K, N >;
   TopKType topk;
   // uint4 - 4 32-bit ints or 8 16-bit values
-  KT A[N];
-
+  KT A[B]; // ascending sorted array: A[0] is the smallest
 #pragma unroll  
-  for(uint32_t i = 0; i < N; i++) {
-    auto u = i + 1;
-    A[i] = u*u*(thid + 17)*1223 % 117; 
-    if(thid == 0) {
-      OUTZ("A[%d] = %d", i, A[i]);
+  for(uint32_t i = 0; i < B; i++) {
+    A[i] = std::numeric_limits<KT>::min();
+  }
+  
+#pragma unroll  
+  for(uint32_t i = 0; i < sliceSz; i++) {
+    auto v = loadData<KT>(thid, i);
+    if(thid < 1) {
+      OUTZ("%d: v[%d] = %d", thid, i, v);
     }
-    if(i >= 1) {
-      if(A[0] < A[i]) {
-        xswap(A[0], A[1]);
-        if(i >= 2) {
-          xswap(A[0], A[i]);
-        }
-      } else if(A[1] < A[i]) {
-        xswap(A[1], A[i]);
-      }
+    
+#pragma unroll    
+    for(uint32_t j = 0; j < B; j++) {
+      if(v < A[j])
+        break;
+      if(j != 0)
+        A[j - 1] = A[j];
+      A[j] = v;
     }
   }
-  if(thid == 0) {
-    OUTREGSZ("%d orig: %d", i, A[i]);
+  if(thid < 4) {
+    OUTREGSZ(B, "thid: %d; sorted: %d", thid, A[i]);
   }
+  // what can we do for large values of K ???
+  // we can keep K-sequence in 2 registers A[0/1] ??
+
+  // do B-way bitonic local-sort for each warp
+#pragma unroll
+  for(uint32_t i = B; i > 1; i /= 2) {
+    topk.template local_sort<B>(A, i);
+    break;
+#pragma unroll  
+    for(uint32_t j = 0; j < i/2; j++) { // pairwise merge: B is maximal 4
+      topk.merge(A[j], A[j + (i + 1)/2]); // B = 3: A[0] + A[2]
+                                          // B = 4: A[0] + A[2], A[1] + A[3] 
+    } // for j
+    topk.template rebuild<B>(A, i/2);
+  } // for i
+  auto lane = gpuLaneId();
+  LOUTZ("final sorted0: %d", A[0]);
+  //LOUTZ("final sorted1: %d", A[1]);
+  
+  return;
 
 // #pragma unroll
 //   for(uint32_t i = 0, ofs = 0; i < Nloads; i++, ofs += blockSz) {
@@ -536,30 +595,29 @@ __global__ void RunTopK_subranges(const KT * __restrict__ data, uint32_t n,
   //    we have (k/2)*N elements to be scanned for 2nd topk
   // for example: k = 16, N = 16 => 128 elements to be scanned (quite small)
 
-  auto lane = gpuLaneId();
-  topk.local_sort(A[0]);
-  topk.local_sort(A[1]);
-  topk.merge(A[0], A[1]);
-  // now the question is: how to identify from which subrange a particular element came ??
+  // topk.local_sort(A[0]);
+  // topk.local_sort(A[1]);
+  // topk.merge(A[0], A[1]);
+  // // now the question is: how to identify from which subrange a particular element came ??
 
   LOUTZ("final sorted: %d", A[0]);
 
 #if 0
   topk.local_sort_regs(A);
   if(thid == 0) {
-    OUTREGSZ("%d 0-before merge: %d", i, A[i]);
+    OUTREGSZ(B, "0-before merge: %d", A[i]);
   }
   if(thid == 16) {
-    OUTREGSZ("%d 16-before merge: %d", i, A[i]);
+    OUTREGSZ(B, "16-before merge: %d", A[i]);
   }
 
   topk.merge_regs(A);
   if(thid == 0) {
-    OUTREGSZ("%d after merge: %d", i, A[i]);
+    OUTREGSZ(B, "after merge: %d", A[i]);
   }
   topk.rebuild_regs(A);
   if(thid == 0) {
-    OUTREGSZ("%d after rebuild: %d", i, A[i]);
+    OUTREGSZ(B, "after rebuild: %d", A[i]);
   }
 #endif
 }
