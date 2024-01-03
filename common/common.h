@@ -48,7 +48,7 @@
 // #include <hipcub/iterator/discard_output_iterator.hpp>
 
 #else
-#include <cuda_runtime_api.h>
+#include <cuda_runtime.h>
 #define FORCEINLINE __forceinline__
 #endif
 

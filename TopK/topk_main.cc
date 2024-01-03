@@ -45,6 +45,22 @@ struct TopkArgs {
   size_t batch_size;
 };
 
+void calcOccupancy(const void *kernel) {
+  size_t dynSHMem = 0;
+  CHK(cudaOccupancyAvailableDynamicSMemPerBlock(&dynSHMem, kernel, 4, 512)); 
+  VLOG("Shared mem available: " << (double)dynSHMem/1024.0 << "KB" );
+
+  int numBlocks = 0;
+  CHK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&numBlocks, 
+      kernel, 512, 24*1024));
+  VLOG("Max active blocks: " << numBlocks);
+
+  int minGridSize = 0, blockSize = 0;
+  CHK(cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, kernel, 
+      32*1024, 512));
+  VLOG("minGridSize: " << minGridSize << " potential BlockSize: " << blockSize);
+}
+
 template <typename T>
 void TypedTopK(TopkArgs<T> args) 
 {
@@ -63,9 +79,10 @@ void TypedTopK(TopkArgs<T> args)
   uint32_t shmem_size = std::bit_ceil(args.k) * max_kv_size * WAVEFRONT_SIZE;
 #else
   //num_threads = args.num_elements / std::bit_ceil(args.k);
-  num_threads = 32;
+  num_threads = 64;
   num_threads = (num_threads + WAVEFRONT_SIZE - 1) & ~(WAVEFRONT_SIZE - 1);
-  uint32_t shmem_size = num_threads * sizeof(max_kv_size) / 2;
+  // 16Kb per block => 4096 words of mem; 512 threads => 16 elements per thread
+  uint32_t shmem_size = num_threads * sizeof(uint32_t) / 2;
 #endif
   VLOG("Testing N = " << args.num_elements << "; K = " << args.k <<
           "; batch_size: " << args.batch_size << 
@@ -74,7 +91,8 @@ void TypedTopK(TopkArgs<T> args)
 
   void* kernel_args[] = {&args.data, &args.num_elements, &args.top_elements,
                          &args.top_indices, &args.k};
-  
+
+  //calcOccupancy(kernel);
   CU_BEGIN_TIMING(0)
   (void)cudaLaunchKernel(kernel, blocks_per_grid, num_threads, kernel_args,
                        shmem_size, 0);

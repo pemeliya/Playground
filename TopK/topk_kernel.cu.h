@@ -149,14 +149,14 @@ __device__ FORCEINLINE uint32_t Idx(uint32_t i) {
 // This shared memory buffer needs to be declared outside of the templated
 // Run(), as otherwise it would generate name conflicts from the multiple
 // instantiations of Run() from the multiple monomorphizations of Run().
-extern __device__ __shared__ int shmem[];
+extern __device__ __shared__ int32_t g_shared_mem[];
 
 
 template <size_t K, typename KT>
 __launch_bounds__(1024, 1) __global__
     void RunTopK_default(KT* data, int n, KT* result, uint32_t* result_idxs, int k) 
 {
-  TopK<K, KT> obj(shmem, k);
+  TopK<K, KT> obj(g_shared_mem, k);
   
   auto in = data + n * blockIdx.x;
   auto vals_out = result + k * blockIdx.x;
@@ -209,7 +209,7 @@ __device__ FORCEINLINE uint32_t gpuLaneId() {
 
 // K - topk size
 // N - elements per thread
-template < class KT, uint32_t K, uint32_t N = 0 >
+template < class KT, uint32_t K >
 struct BitonicTopK {
   
   constexpr static uint32_t logK = log2xN(K);
@@ -224,8 +224,8 @@ struct BitonicTopK {
 
   // local sort produces sorted runs of size K: ascending / descending
   // i.e. for K = 4: [3 5 8 9; 5 3 1 1; 2 5 6 10; 11 4 3 2]
-  template <uint32_t B, class NT> // B >= I
-  __device__ FORCEINLINE void local_sort(NT (&A)[B], uint32_t I)
+  template <uint32_t SZ, class NT> // SZ >= I
+  __device__ FORCEINLINE void local_sort(NT (&A)[SZ], uint32_t I)
   {
     auto lane = gpuLaneId();
     // this produces sequences of length K: alternating ascending - descending
@@ -278,20 +278,14 @@ struct BitonicTopK {
           A = B;
         }
       } else { // A & B are just two ascending sequences => merge directly
-        // 0 - 31, 1 - 30
-        // 0 4
-        // 1 3
-        // 2 2
-        // 3 1
-        // 4 0
         // sync wraps around
         B = gpuShuffle< ShflType::Sync >(B, WarpSize - 1 - lane); 
         A = A < B ? B : A;
       }
   }
 
-  template <uint32_t B, class NT>
-  __device__ FORCEINLINE void rebuild(NT (&A)[B], uint32_t I)
+  template <uint32_t SZ, class NT>
+  __device__ FORCEINLINE void rebuild(NT (&A)[SZ], uint32_t I = 1)
   {
     auto lane = gpuLaneId();
     // rebuild bitonic sequences of length K to sorted ones
@@ -310,107 +304,8 @@ struct BitonicTopK {
     }
   }
 
-  __device__ void operator()(const KT * __restrict__ data, uint32_t n, 
-      KT * __restrict__ result, uint32_t * __restrict__ result_idxs, uint32_t k) 
-  {
-    constexpr uint32_t WarpSize = WAVEFRONT_SIZE;
-    constexpr auto minVal = std::numeric_limits< KT >::min();
-
-    const uint32_t bidx = blockIdx.x, blockSz = blockDim.x;
-    auto in = data + n * bidx;
-    const uint32_t thid = threadIdx.x, lane = thid % WarpSize;
-    uint32_t idx = thid;
-
-    KVT A{idx < n ? in[idx] : minVal, idx};
-    //LOUTZ("original: %d", A);
-    local_sort(A);
-    
-    uint32_t i = 0;
-    for(idx += blockSz; ; idx += blockSz, i++) {
-      auto warpId = idx & ~(WarpSize - 1);
-      //OUTZ("idx: %d, warpID: %d", idx, warpId);
-      if(warpId >= n) { // retire completely unused warps
-         break;
-      }
-     //__builtin_amdgcn_update_dpp();
-    //__builtin_amdgcn_ds_sizzle();
-
-      KVT B{idx < n ? in[idx] : minVal, idx};
-      // if(thid == 1023)
-      // LOUTZ("loaded B: %d = %d", idx, B.key);
-      local_sort(B);
-      merge(A, B);
-      //OUTZ("%d: idx: %d: xA = %d, A = %d; xB = %d, B = %d", thid, idx, xA, A, xB, B);
-      rebuild(A);
-    
-      // if(idx < n)
-      // if(lane == 0) {
-    //   OUTZ("i = %d/%d; n = %d; mywarp: %d; my range: [%d; %d]", i, warpId, n, 
-    //         thid / WarpSize, warpId, warpId + WarpSize);
-    // }
-    // __syncthreads();
-    } // for idx
-    auto sh = (KVT *)shmem;
-
-    const auto warpId = thid / WarpSize;
-#if 0 
-    sh[thid] = A;
-     __syncthreads();
-    if(warpId == 0) {
-      for(uint32_t i = 1; i < blockSz / WarpSize; i++) {
-        auto B = sh[lane + i*WarpSize];
-        merge(A, B);
-        rebuild(A);
-      }
-    }
-#else
-    if(int32_t idx = thid - blockSz / 2; idx >= 0) { // only upper threads need to write
-      sh[idx] = A;
-    }
-    for(uint32_t ofs = blockSz / 2, memofs = 0; ofs >= WarpSize; ofs = ofs / 2) 
-    {
-      __syncthreads();
-      if(thid < ofs) {
-        // save upper half in shared memory  
-        //int32_t idx = thid - (bidx / WarpSize + 1) / 2 * WarpSize; 
-        auto B = sh[thid + memofs];
-        merge(A, B);
-        rebuild(A);
-        // actually only upper blocks need to write back
-        if(thid >= ofs/2) {
-          sh[thid + memofs] = A; // write to the same place where we read from
-        }
-      }
-      memofs += ofs/2;
-    } // for ofs
-#endif
-    if(warpId == 0) {
-#pragma unroll      
-      for(uint32_t i = WarpSize / K, div = WarpSize/2; i > 1; i /= 2, div /= 2) {
-        merge(A);
-        // same as: (lane & ~(K-1))*2 + (lane & (K-1))
-        auto idx = (lane / K)*2*K + lane % K;
-        A = gpuShuffle< ShflType::Sync >(A, idx); 
-        if(lane >= div) {
-          A = KVT{minVal, 0}; // remove lower unused elements
-        }
-        rebuild(A);
-      }
-  
-      //LOUTZ("final: %d", A.key);
-      auto vals_out = result + k * bidx + thid;
-      auto idxs_out = result_idxs + k * bidx + thid;
-
-      uint32_t diff = thid - (K - k);
-      if(diff < k) { // use unsigned compare ! 
-        vals_out[0] = A.key;
-        idxs_out[0] = A.idx;
-      }
-    } // if(warpId)  
-  }
-
-  template <class NT>
-  __device__ FORCEINLINE void local_sort_regs(NT (&A)[N])
+  template <uint32_t SZ, class NT>
+  __device__ FORCEINLINE void local_sort_regs(NT (&A)[SZ])
   {
     int uu = 0;
 #pragma unroll
@@ -426,7 +321,7 @@ struct BitonicTopK {
     //   d = (bit0 == 0) ? max(d, xd) : min(d, xd);
     // }
 #pragma unroll
-        for(uint32_t n = 0; n < N; n++) {
+        for(uint32_t n = 0; n < SZ; n++) {
           if((n & j) == 0) {
             int32_t nj = n ^ j, biti = (n & i) == i;
             if((biti ^ (A[n] < A[nj])) == 0){
@@ -439,7 +334,7 @@ struct BitonicTopK {
 #pragma unroll
     for(int32_t i = K/2; i >= 1; i /= 2) {
 #pragma unroll      
-      for(uint32_t n = 0; n < N; n++) {
+      for(uint32_t n = 0; n < SZ; n++) {
         if((n & i) == 0) {
           int32_t ni = n ^ i;
           if(!(A[n] < A[ni])) {
@@ -452,21 +347,21 @@ struct BitonicTopK {
   }
 
   // merge results from upper half of threads to the lower ones
-  template <class NT>
-  __device__ FORCEINLINE void merge_regs(NT (&A)[N])
+  template <uint32_t SZ, class NT>
+  __device__ FORCEINLINE void merge_regs(NT (&A)[SZ])
   {
     auto lane = gpuLaneId();
     constexpr uint32_t WarpSize = WAVEFRONT_SIZE;
 
     if(lane >= warpSize/2) {
 #pragma unroll      
-      for(uint32_t n = 0; n < N/2; n++) {
-        xswap(A[n], A[N-1-n]);
+      for(uint32_t n = 0; n < SZ/2; n++) {
+        xswap(A[n], A[SZ - 1 - n]);
       }
     }
 #pragma unroll
-    for(uint32_t n = 0; n < N; n++) {
-      // for now assume that N == K
+    for(uint32_t n = 0; n < SZ; n++) {
+      // for now assume that SZ == K
       NT U = A[n];
       // read from upper half of threads
       U = gpuShuffle< ShflType::Down >(U, WarpSize/2); 
@@ -474,13 +369,13 @@ struct BitonicTopK {
     }
   }
 
-    template <class NT>
-  __device__ FORCEINLINE void rebuild_regs(NT (&A)[N])
+  template <uint32_t SZ, class NT>
+  __device__ FORCEINLINE void rebuild_regs(NT (&A)[SZ])
   {
 #pragma unroll    
     for(int32_t j = K / 2; j >= 1; j /= 2) {
 #pragma unroll
-      for(uint32_t n = 0; n < N; n++) {
+      for(uint32_t n = 0; n < SZ; n++) {
         if((n & j) == 0) {
           int32_t nj = n ^ j, bitK = (n & K) == K;
           if((bitK ^ (A[n] < A[nj])) == 0){
@@ -489,6 +384,73 @@ struct BitonicTopK {
         }
       } // for n
     } // for j
+  }
+
+  // reduces values in A to return top-K elements per warp
+  template <bool FinalRebuild, class NT>
+  __device__ FORCEINLINE void final_reduce(NT& A, const NT& minV) 
+  {
+    constexpr uint32_t WarpSize = WAVEFRONT_SIZE;
+    const auto lane = gpuLaneId();
+#pragma unroll    
+    for(uint32_t i = WarpSize / K, div = WarpSize/2; i > 1; i /= 2, div /= 2) {
+      merge(A);
+      // same as: (lane & ~(K-1))*2 + (lane & (K-1))
+      auto idx = (lane / K)*2*K + lane % K;
+      A = gpuShuffle< ShflType::Sync >(A, idx); 
+      if(lane >= div) {
+        A = minV; // remove lower unused elements
+      }
+      if(i > 2 || FinalRebuild) { // final rebuild is not always necessary
+        NT xA[1] = {A};
+        rebuild(xA);
+        A = xA[0];
+      }
+    } // for
+  }
+
+  // inter-warps merge of sorted values in A: results are returned by the 1st warp
+  // shared memory requirements: sizeof(NT)*BlockSize / 2
+  // values of A must be alternating sorted k-sequences
+  template <class NT>
+  __device__ FORCEINLINE void merge_warps(const uint32_t thid, 
+        const uint32_t blockSz, NT &A, NT *sh) 
+  {
+    constexpr uint32_t WarpSize = WAVEFRONT_SIZE;
+    const auto warpId = thid / WarpSize;
+    NT xA[1] = { A }; // rebuild takes an array as a parameter
+#if 0 
+    sh[thid] = xA[0];
+    __syncthreads();
+    if(warpId == 0) {
+      for(uint32_t i = 1; i < blockSz / WarpSize; i++) {
+        auto B = sh[lane + i*WarpSize];
+        merge(xA[0], B);
+        rebuild(xA);
+      }
+    }
+#else
+    if(int32_t idx = thid - blockSz / 2; idx >= 0) { // only upper threads need to write
+      sh[idx] = xA[0];
+    }
+    for(uint32_t ofs = blockSz / 2, memofs = 0; ofs >= WarpSize; ofs = ofs / 2) 
+    {
+      __syncthreads();
+      if(thid < ofs) {
+        // save upper half in shared memory  
+        //int32_t idx = thid - (bidx / WarpSize + 1) / 2 * WarpSize; 
+        auto B = sh[thid + memofs];
+        merge(xA[0], B);
+        rebuild(xA);
+        // actually only upper blocks need to write back
+        if(thid >= ofs/2) {
+          sh[thid + memofs] = xA[0]; // write to the same place where we read from
+        }
+      }
+      memofs += ofs/2;
+    } // for ofs
+#endif
+    A = xA[0];
   }
 
   // each thread does the following: 
@@ -502,11 +464,68 @@ struct BitonicTopK {
 
 template <uint32_t K, typename KT>
 __launch_bounds__(1024, 1)
-__global__ void RunTopK_new(const KT * __restrict__ data, uint32_t n, 
+__global__ void RunTopK_bitonik_shuffle(const KT * __restrict__ data, uint32_t n, 
     KT * __restrict__ result, uint32_t * __restrict__ result_idxs, uint32_t k) 
 {
-  BitonicTopK< KT, K >()(data, n, result, result_idxs, k);
-}
+  using TopK = BitonicTopK< KT, K >;
+  using KVT = typename TopK::KVT;
+  TopK topk;
+   
+  constexpr uint32_t WarpSize = WAVEFRONT_SIZE;
+  constexpr auto minVal = std::numeric_limits< KT >::min();
+
+  const uint32_t bidx = blockIdx.x, blockSz = blockDim.x;
+  auto in = data + n * bidx;
+  const uint32_t thid = threadIdx.x, lane = thid % WarpSize;
+  uint32_t idx = thid;
+
+  KVT A{idx < n ? in[idx] : minVal, idx};
+  //LOUTZ("original: %d", A);
+  topk.template local_sort<1>(A);
+    
+  uint32_t i = 0;
+  for(idx += blockSz; ; idx += blockSz, i++) {
+    auto warpId = idx & ~(WarpSize - 1);
+    //OUTZ("idx: %d, warpID: %d", idx, warpId);
+    if(warpId >= n) { // retire completely unused warps
+       break;
+    }
+     //__builtin_amdgcn_update_dpp();
+    //__builtin_amdgcn_ds_sizzle();
+
+    KVT B{idx < n ? in[idx] : minVal, idx};
+    // if(thid == 1023)
+    // LOUTZ("loaded B: %d = %d", idx, B.key);
+    local_sort(B);
+    merge(A, B);
+    //OUTZ("%d: idx: %d: xA = %d, A = %d; xB = %d, B = %d", thid, idx, xA, A, xB, B);
+    rebuild(A);
+    
+    // if(idx < n)
+    // if(lane == 0) {
+    //   OUTZ("i = %d/%d; n = %d; mywarp: %d; my range: [%d; %d]", i, warpId, n, 
+    //         thid / WarpSize, warpId, warpId + WarpSize);
+    // }
+    // __syncthreads();
+  } // for idx
+
+  topk.merge_warps(thid, blockSz, A, (KVT *)g_shared_mem);
+  if(thid < WarpSize) {
+
+    topk.final_reduce(A, KVT{minVal, 0});
+ 
+    //LOUTZ("final: %d", A.key);
+    auto vals_out = result + k * bidx + thid;
+    auto idxs_out = result_idxs + k * bidx + thid;
+
+    uint32_t diff = thid - (K - k);
+    if(diff < k) { // use unsigned compare ! 
+      vals_out[0] = A.key;
+      idxs_out[0] = A.idx;
+    }
+  } // if(warpId)  
+} // RunTopK_bitonik_shuffle
+
 
 // B - number of top elements which are searched for each subrange [1,2,3,4]
 // this also defines the minimal number of registers per thread
@@ -515,9 +534,13 @@ __global__ void RunTopK_new(const KT * __restrict__ data, uint32_t n,
 
 // this function emulates loading ith data element from global memory
 template <typename KT>
-__device__ KT loadData(uint32_t thid, uint32_t i) {
+__device__ KT loadData(uint32_t thid, uint32_t N, uint32_t i) {
+#if 1
   auto u = i + 13, v = thid - 11711;
   KT x = u*u*v*v % 259; 
+#else
+  KT x = thid*N + i + 1;
+#endif
   return x;
 }
 
@@ -527,61 +550,107 @@ __global__ void RunTopK_subranges(const KT * __restrict__ data, uint32_t n,
 {
   // each thread works on 16 elements, hence one warp - 1024 elements
   using VecT = uint4;
-  constexpr uint32_t K = 32, Nloads = K * sizeof(KT) / sizeof(VecT);
+  constexpr uint32_t K = 16, Nloads = K * sizeof(KT) / sizeof(VecT);
   uint32_t thid = threadIdx.x, blockSz = blockDim.x;
+
+  auto shmem = (KT *)g_shared_mem;
 
   // block is 64 threads: 64*16 -> 1024 elements to read
   // read 4 elements by each thread: total 4 * BlockSize
 
-  constexpr uint32_t B = 1, N = 8;
-  const uint32_t sliceSz = 32; // subrange size processed by each thread
-  using TopKType = BitonicTopK< KT, K, N >;
+  constexpr uint32_t N = 8, // subrange size processed by each thread
+                     S = 2; // top-S elements are computed on-the-fly
+  // for small values of K: S == K (i.e. K <= 4)
+
+  using TopKType = BitonicTopK< KT, K >;
   TopKType topk;
   // uint4 - 4 32-bit ints or 8 16-bit values
-  KT A[B]; // ascending sorted array: A[0] is the smallest
+  KT A[N], B[S]; // ascending sorted array: B[0] is the smallest
+                 // B[0] <= B[1] <= .. <= B[S-1]
 #pragma unroll  
-  for(uint32_t i = 0; i < B; i++) {
-    A[i] = std::numeric_limits<KT>::min();
-  }
-  
-#pragma unroll  
-  for(uint32_t i = 0; i < sliceSz; i++) {
-    auto v = loadData<KT>(thid, i);
+  for(uint32_t i = 0; i < N; i++) {
+    KT v = loadData<KT>(thid, N, i);
     if(thid < 1) {
       OUTZ("%d: v[%d] = %d", thid, i, v);
     }
-    
 #pragma unroll    
-    for(uint32_t j = 0; j < B; j++) {
-      if(v < A[j])
-        break;
-      if(j != 0)
-        A[j - 1] = A[j];
-      A[j] = v;
+    for(uint32_t j = 0; j < S; j++) {
+      if(i == 0) {
+        A[j] = v;
+      } else {
+        if(v < A[j]) break;
+        if(j != 0) A[j - 1] = A[j];
+        A[j] = v;
+      }
     }
   }
-  if(thid < 4) {
-    OUTREGSZ(B, "thid: %d; sorted: %d", thid, A[i]);
+#pragma unroll // copy over first S sorted elements
+  for(uint32_t j = 0; j < S; j++) {
+    B[j] = A[j];
+  }
+  if(thid < 1) {
+    OUTREGSZ(S, "thid: %d; sorted: %d", thid, B[i]);
   }
   // what can we do for large values of K ???
   // we can keep K-sequence in 2 registers A[0/1] ??
 
-  // do B-way bitonic local-sort for each warp
+  // do S-way bitonic local-sort for each warp
 #pragma unroll
-  for(uint32_t i = B; i > 1; i /= 2) {
-    topk.template local_sort<B>(A, i);
-    break;
+  for(uint32_t i = S; i > 1; i /= 2) {
+    topk.local_sort(B, i);
 #pragma unroll  
     for(uint32_t j = 0; j < i/2; j++) { // pairwise merge: B is maximal 4
-      topk.merge(A[j], A[j + (i + 1)/2]); // B = 3: A[0] + A[2]
+      topk.merge(B[j], B[j + (i + 1)/2]); // B = 3: A[0] + A[2]
                                           // B = 4: A[0] + A[2], A[1] + A[3] 
     } // for j
-    topk.template rebuild<B>(A, i/2);
+    topk.rebuild(B, i/2);
   } // for i
-  auto lane = gpuLaneId();
-  LOUTZ("final sorted0: %d", A[0]);
-  //LOUTZ("final sorted1: %d", A[1]);
+  if(S == 1) {
+    topk.rebuild(B, 1);
+  }
+  // and now we need to merge all warps together..
   
+  // NOTE: makes sense to put 'rebuild' at the beginning..
+  topk.merge_warps(thid, blockSz, B[0], (KT *)g_shared_mem);
+  auto lane = gpuLaneId();
+
+  auto shmem_top = (KT *)g_shared_mem;
+  if(thid < warpSize) {
+    constexpr KT minVal = std::numeric_limits< KT >::min();
+    topk.template final_reduce<false>(B[0], minVal);
+    LOUTZ("final sorted: %d", B[0]);
+    if(thid < K) {
+      shmem_top[thid] = B[0];
+    }
+  }
+
+  // threads 
+  // A B C D | E F G H | I J K L
+  
+  // for K = 4, we have: A, C, G, L
+  // hence only the first group is needed
+  // primitive algorithm: 
+  // 1. load K elements to shared memory: shmem_top[K]
+  // 2. each thread needs to check if its S elements B[0..S) are in shmem_top
+  int z = 0;
+  __syncthreads();
+
+  OUTREGSZ(S, "thid: %d; initial: %d", thid, A[i]);
+  return;
+
+  // TODO what to do with duplicate elements ???
+#pragma unroll  
+  for(uint32_t i = 0; i < K; i++) {
+    for(uint32_t j = 0; j < S; j++) {
+      // NOTE: here we need to compare against A since these are not touched
+      if(shmem_top[i] == A[j]) {
+        z++;
+      }
+    }
+  }
+  // max (K/S) hits => (K/S) * rangeSz elements to process
+  OUTZ("%d: number of hits: %d", thid, z);
+ 
   return;
 
 // #pragma unroll
@@ -594,33 +663,7 @@ __global__ void RunTopK_subranges(const KT * __restrict__ data, uint32_t n,
   // 3. in worst case, all 2 delegates from each group present: hence in total
   //    we have (k/2)*N elements to be scanned for 2nd topk
   // for example: k = 16, N = 16 => 128 elements to be scanned (quite small)
-
-  // topk.local_sort(A[0]);
-  // topk.local_sort(A[1]);
-  // topk.merge(A[0], A[1]);
-  // // now the question is: how to identify from which subrange a particular element came ??
-
-  LOUTZ("final sorted: %d", A[0]);
-
-#if 0
-  topk.local_sort_regs(A);
-  if(thid == 0) {
-    OUTREGSZ(B, "0-before merge: %d", A[i]);
-  }
-  if(thid == 16) {
-    OUTREGSZ(B, "16-before merge: %d", A[i]);
-  }
-
-  topk.merge_regs(A);
-  if(thid == 0) {
-    OUTREGSZ(B, "after merge: %d", A[i]);
-  }
-  topk.rebuild_regs(A);
-  if(thid == 0) {
-    OUTREGSZ(B, "after rebuild: %d", A[i]);
-  }
-#endif
-}
+} // RunTopK_subranges
 
 template <typename KT>
 __global__ void RunTopK_test(KT* data, uint32_t n, KT* result, uint32_t* result_idxs, uint32_t k) 
@@ -677,17 +720,7 @@ __global__ void RunTopK_test(KT* data, uint32_t n, KT* result, uint32_t* result_
   // 32 / 8 = 4
   // merge = 2
   // merge = 1
-#pragma unroll
-  for(uint32_t i = WarpSize / K, div = WarpSize/2; i > 1; i /= 2, div /= 2) {
-    topk.merge(A);
-    // same as: (lane & ~(K-1))*2 + (lane & (K-1))
-    auto idx = (lane / K)*2*K + lane % K;
-    A = gpuShuffle< ShflType::Sync >(A, idx); 
-    if(lane >= div) {
-      A = minVal; // remove lower unused elements
-    }
-    topk.rebuild(A);
-  }
+  topk.final_reduce(A, minVal);
   //LOUTZ("local sorted: %d; merged: %d, shifted: %d", A, mA, zA);
   OUTZ("%d: squashed: %d", lane, A);
 }
