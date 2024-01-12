@@ -11,6 +11,7 @@
 #if COMPILE_FOR_ROCM
 #include<hip/hip_runtime.h>
 #include<hip/hip_cooperative_groups.h>
+#include <rccl/rccl.h>
 #define cudaStream_t hipStream_t
 #define cudaEvent_t hipEvent_t
 
@@ -34,6 +35,7 @@
 #define cudaGetDeviceProperties hipGetDeviceProperties
 #define cudaStreamCreateWithFlags hipStreamCreateWithFlags
 #define cudaStreamCreateWithPriority hipStreamCreateWithPriority
+#define cudaStreamNonBlocking hipStreamNonBlocking
 #define cudaStreamDestroy hipStreamDestroy
 #define cudaEventCreate hipEventCreate
 #define cudaEventDestroy hipEventDestroy

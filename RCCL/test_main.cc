@@ -7,7 +7,7 @@
 #include <iostream>
 #include <numeric>
 #include <random>
-#include "rccl/rccl.h"
+#include <thread>
 #include "common/example_utils.hpp"
 
 #define NCCLCHECK(cmd) do {                         \
@@ -19,22 +19,33 @@
   }                                                 \
 } while(0)
 
+template < class T >
 struct GpuComm {
-  explicit GpuComm(size_t nGpus_, size_t bufSize_) : nGpus(nGpus_), bufSize(bufSize_),
+
+  ncclUniqueId ncclId;
+  size_t nGpus, bufSize;
+  std::vector< int > gpus;
+  std::vector< hipStream_t > streams;
+  std::vector< T *> sendBufs, recvBufs;
+  std::vector <ncclComm_t > comms;
+  std::vector< T > hostBuf;
+  std::vector< std::thread > threads;
+
+public:
+  GpuComm(size_t nGpus_, size_t bufSize_) : nGpus(nGpus_), bufSize(bufSize_),
       gpus(nGpus_), streams(nGpus_), sendBufs(nGpus_), recvBufs(nGpus_),
       comms(nGpus_), hostBuf(nGpus_ * bufSize_)
   { 
     NCCLCHECK(ncclGetUniqueId(&ncclId));
-
 
     for (size_t i = 0; i < nGpus; i++) 
     {
       gpus[i] = i;
       CHK(cudaSetDevice(gpus[i]));
       //  AllocateBuffs(sendBufs+i, sendBytes, recvBufs+i, recvBytes, expected+i, (size_t)maxBytes);
-      CHK(cudaMalloc(sendBufs.data() + i, bufSize));
-      CHK(cudaMalloc(recvBufs.data() + i, bufSize));
-      CHK(hipStreamCreateWithFlags(streams.data() + i, hipStreamNonBlocking));
+      CHK(cudaMalloc(sendBufs.data() + i, bufSize*sizeof(T)));
+      CHK(cudaMalloc(recvBufs.data() + i, bufSize*sizeof(T)));
+      CHK(cudaStreamCreateWithFlags(streams.data() + i, cudaStreamNonBlocking));
   
   //     if (streamnull)
   //     	streams[i] = NULL;
@@ -64,7 +75,6 @@ struct GpuComm {
     }
   }
 
-  template < class T >
   constexpr auto getNcclType() {
 #define OO(type, id) \
   if constexpr(std::is_same_v<T, type>) return id
@@ -80,74 +90,68 @@ struct GpuComm {
 #undef OO
   }
 
-  template < class T >
   void initBuf(T *buf, const T& val) {
-    std::fill(buf, buf + bufSize / sizeof(T), val);
+    std::fill(buf, buf + bufSize, val);
   }
 
-  template < class T >
   void init() {
     for (int i = 0; i < nGpus; i++) 
     {
       gpus[i] = i;
       CHK(cudaSetDevice(gpus[i]));
       CHK(cudaMemset(recvBufs[i], 0, bufSize));
-      initBuf((T *)sendBufs[i], T(i));
+      initBuf(sendBufs[i], T(i));
     }
     CHK(cudaDeviceSynchronize());
   }
 
-  template < class T >
   void verify(int i) {
     int dev;
-    auto dst = (T *)(hostBuf.data() + i * bufSize);
+    auto dst = hostBuf.data() + i * bufSize;
     NCCLCHECK(ncclCommCuDevice(comms[i], &dev));
     CHK(cudaSetDevice(dev));
-    CHK(cudaMemcpy(dst, recvBufs[i], bufSize, cudaMemcpyDeviceToHost));
+    CHK(cudaMemcpy(dst, recvBufs[i], bufSize*sizeof(T), cudaMemcpyDeviceToHost));
     VLOG(dev << ": element: " << dst[0]);
   }
 
-  template < class T >
-  void run() 
-  {
-    init< T >();
-    int count = bufSize / sizeof(T);
-    auto type = getNcclType<T>();
+  void run_single_gpu(int i) {
+
+    int count = bufSize;
+    auto type = getNcclType();
+    int nRanks, rank, dev;
+
+    NCCLCHECK(ncclCommCount(comms[i], &nRanks));
+    NCCLCHECK(ncclCommCuDevice(comms[i], &dev));
+    CHK(cudaSetDevice(dev));
+
+    ncclCommUserRank(comms[i], &rank);
+    int recvPeer = (rank-1+nRanks) % nRanks;
+    int sendPeer = (rank+1) % nRanks;
+
+    VLOG(std::hex << std::this_thread::get_id() << std::dec << 
+          ": Running thread with rank: " << rank << " peers: " 
+          << recvPeer << " " << sendPeer);
 
     NCCLCHECK(ncclGroupStart());
+    NCCLCHECK(ncclSend(sendBufs[i], count, type, sendPeer, comms[i], streams[i]));
+    NCCLCHECK(ncclRecv(recvBufs[i], count, type, recvPeer, comms[i], streams[i]));
+    NCCLCHECK(ncclGroupEnd());
+  }
+
+  void run() 
+  {
+    NCCLCHECK(ncclGroupStart());
     for (int i = 0; i < nGpus; i++) {
-      int nRanks, rank, dev;
-      NCCLCHECK(ncclCommCount(comms[i], &nRanks));
-      NCCLCHECK(ncclCommCuDevice(comms[i], &dev));
-      CHK(cudaSetDevice(dev));
-
-      ncclCommUserRank(comms[i], &rank);
-      int recvPeer = (rank-1+nRanks) % nRanks;
-      int sendPeer = (rank+1) % nRanks;
-
-      VLOG(std::hex << (uint64_t)pthread_self() << std::dec << ": Running thread with rank: " << rank << " peers: " 
-        << recvPeer << " " << sendPeer);
-
-      NCCLCHECK(ncclSend(sendBufs[i], count, type, sendPeer, comms[i], streams[i]));
-      NCCLCHECK(ncclRecv(recvBufs[i], count, type, recvPeer, comms[i], streams[i]));
-      // int dev;
-      // ncclCommCuDevice(comms[i], &dev);
+      run_single_gpu(i);
     }
     NCCLCHECK(ncclGroupEnd());
 
     CHK(cudaDeviceSynchronize());
     for (int i = 0; i < nGpus; i++) {
-      verify<T>(i);
+      verify(i);
     }
   }
 
-  ncclUniqueId ncclId;
-  size_t nGpus, bufSize;
-  std::vector< int > gpus;
-  std::vector< hipStream_t > streams;
-  std::vector< void*> sendBufs, recvBufs;
-  std::vector <ncclComm_t > comms;
-  std::vector< uint8_t > hostBuf;
 };
 
 template < class T >
@@ -157,8 +161,9 @@ void runRCCLTest(size_t len)
   CHK(hipGetDeviceCount(&nGpus));
   VLOG("Num devices: " << nGpus);
 
-  GpuComm obj(nGpus, len);
-  obj.run< float >();
+  GpuComm<T> obj(nGpus, len);
+  obj.init();
+  obj.run();
 
   
 //      } else {
@@ -217,6 +222,8 @@ void runRCCLTest(size_t len)
 
 
 }
+
+// NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,COLL
 
 int main() try 
 {
