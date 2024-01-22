@@ -10,6 +10,8 @@
 #include <thread>
 #include "common/example_utils.hpp"
 
+#define USE_MEMCPY_PEER 1
+
 #define NCCLCHECK(cmd) do {                         \
   ncclResult_t res = cmd;                           \
   if (res != ncclSuccess) {                         \
@@ -42,9 +44,13 @@ public:
     {
       gpus[i] = i;
       CHK(cudaSetDevice(gpus[i]));
-      //  AllocateBuffs(sendBufs+i, sendBytes, recvBufs+i, recvBytes, expected+i, (size_t)maxBytes);
-      CHK(cudaMalloc(sendBufs.data() + i, bufSize*sizeof(T)));
-      CHK(cudaMalloc(recvBufs.data() + i, bufSize*sizeof(T)));
+
+      int flags = //hipDeviceMallocDefault;
+                  //hipDeviceMallocFinegrained;
+                   hipDeviceMallocUncached;
+                  // hipMallocSignalMemory;
+      CHK(hipExtMallocWithFlags((void **)(sendBufs.data() + i), bufSize*sizeof(T), flags));
+      CHK(hipExtMallocWithFlags((void **)(recvBufs.data() + i), bufSize*sizeof(T), flags));
       CHK(cudaStreamCreateWithFlags(streams.data() + i, cudaStreamNonBlocking));
   
   //     if (streamnull)
@@ -101,6 +107,14 @@ public:
       CHK(cudaSetDevice(gpus[i]));
       CHK(cudaMemset(recvBufs[i], 0, bufSize));
       initBuf(sendBufs[i], T(i));
+#if USE_MEMCPY_PEER
+      int peer = (i + 1) % nGpus, enable = 0;
+      CHK(cudaDeviceCanAccessPeer(&enable, i, peer));
+      if(enable == 0) {
+        CHK(cudaDeviceEnablePeerAccess(peer, 0));
+      }
+      VLOG("Can access peer: " << enable);
+#endif
     }
     CHK(cudaDeviceSynchronize());
   }
@@ -111,7 +125,17 @@ public:
     NCCLCHECK(ncclCommCuDevice(comms[i], &dev));
     CHK(cudaSetDevice(dev));
     CHK(cudaMemcpy(dst, recvBufs[i], bufSize*sizeof(T), cudaMemcpyDeviceToHost));
-    VLOG(dev << ": element: " << dst[0]);
+    VLOG("Device " << dev << " verify: element: " << dst[0]);
+  }
+
+  void run_single_gpu_memcpy(int i) {
+
+    //NCCLCHECK(ncclCommCount(comms[i], &nRanks));
+    int dev = i;
+    CHK(cudaSetDevice(dev));
+    int sendPeer = (i + 1) % nGpus;
+    CHK(cudaMemcpyPeerAsync(recvBufs[sendPeer],
+        sendPeer, sendBufs[i], i, bufSize*sizeof(T), streams[i]));
   }
 
   void run_single_gpu(int i) {
@@ -128,9 +152,9 @@ public:
     int recvPeer = (rank-1+nRanks) % nRanks;
     int sendPeer = (rank+1) % nRanks;
 
-    VLOG(std::hex << std::this_thread::get_id() << std::dec << 
-          ": Running thread with rank: " << rank << " peers: " 
-          << recvPeer << " " << sendPeer);
+    // VLOG(std::hex << std::this_thread::get_id() << std::dec << 
+    //       ": Running thread with rank: " << rank << " peers: " 
+    //       << recvPeer << " " << sendPeer);
 
     NCCLCHECK(ncclGroupStart());
     NCCLCHECK(ncclSend(sendBufs[i], count, type, sendPeer, comms[i], streams[i]));
@@ -138,32 +162,54 @@ public:
     NCCLCHECK(ncclGroupEnd());
   }
 
-  void run() 
+  void run(bool verifyData = false) 
   {
     NCCLCHECK(ncclGroupStart());
     for (int i = 0; i < nGpus; i++) {
+#if USE_MEMCPY_PEER
+      run_single_gpu_memcpy(i);
+#else
       run_single_gpu(i);
+#endif
     }
     NCCLCHECK(ncclGroupEnd());
 
-    CHK(cudaDeviceSynchronize());
+    //CHK(cudaDeviceSynchronize());
     for (int i = 0; i < nGpus; i++) {
-      verify(i);
+      CHK(cudaSetDevice(i));
+      CHK(cudaStreamSynchronize(streams[i]));
+      if(verifyData) {
+        verify(i);
+      }
     }
   }
-
 };
 
 template < class T >
 void runRCCLTest(size_t len)
 {
-  int nGpus = 0;
+  int nGpus = 0, nwarmups = 5, niters = 10;
+  size_t nbytes = len * sizeof(T);
   CHK(hipGetDeviceCount(&nGpus));
-  VLOG("Num devices: " << nGpus);
+  VLOG("Num devices: " << nGpus << ", data to be sent: " << (double)nbytes/(1024*1024) << " Mb");
 
   GpuComm<T> obj(nGpus, len);
   obj.init();
-  obj.run();
+
+  for(int i = 0; i <nwarmups; i++) { // warm-up
+    obj.run(true);
+  }
+
+  CPU_BEGIN_TIMING(sendrecv);
+  for(int i = 0; i < niters; i++) { 
+    obj.run(false);
+  }
+  auto tnow = std::chrono::high_resolution_clock::now();
+  std::chrono::duration<double, std::milli> ms = tnow - z1_sendrecv;
+  double avgMs = ms.count() / niters;
+  double baseBw = (double)nbytes / 1.0E6 / avgMs;
+
+  PRINTZ("Time elapsed: %.3f ms, bandwidth: %.3f Gb/s", avgMs, baseBw);
 
   
 //      } else {
@@ -227,7 +273,7 @@ void runRCCLTest(size_t len)
 
 int main() try 
 {
-   runRCCLTest<float>(1000000);
+   runRCCLTest<float>(16*1024*1024);
 }
 catch(std::exception& ex) {
   VLOG("Exception: " << ex.what());

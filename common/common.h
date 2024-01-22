@@ -15,9 +15,15 @@
 #define cudaStream_t hipStream_t
 #define cudaEvent_t hipEvent_t
 
+#define cudaDeviceCanAccessPeer hipDeviceCanAccessPeer 
+#define cudaDeviceEnablePeerAccess hipDeviceEnablePeerAccess
+#define cudaDeviceDisablePeerAccess hipDeviceDisablePeerAccess
 #define cudaMalloc hipMalloc
 #define cudaFree hipFree
 #define cudaMemcpy hipMemcpy
+#define cudaMemcpyPeer hipMemcpyPeer
+#define cudaMemcpyAsync hipMemcpyAsync
+#define cudaMemcpyPeerAsync hipMemcpyPeerAsync
 #define cudaMemset hipMemset
 #define cudaHostAlloc hipHostMalloc
 #define cudaFreeHost hipHostFree
@@ -33,6 +39,7 @@
 #define cudaMemGetInfo hipMemGetInfo
 #define cudaDeviceProp hipDeviceProp_t
 #define cudaGetDeviceProperties hipGetDeviceProperties
+#define cudaStreamSynchronize hipStreamSynchronize
 #define cudaStreamCreateWithFlags hipStreamCreateWithFlags
 #define cudaStreamCreateWithPriority hipStreamCreateWithPriority
 #define cudaStreamNonBlocking hipStreamNonBlocking
@@ -56,6 +63,7 @@
 #endif
 
 #define VLOG(x) std::cerr << x << std::endl;
+#define PRINTZ(fmt, ...) fprintf(stderr, fmt"\n", ##__VA_ARGS__)
 
 #define CHK(x) if(auto res = (x); res != cudaSuccess) { \
   ThrowError<256>(#x " failed with: '%s'(%d) at %s:%d\n", cudaGetErrorString(res),  \
