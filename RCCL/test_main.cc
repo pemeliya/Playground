@@ -11,6 +11,7 @@
 #include "common/example_utils.hpp"
 
 #define USE_MEMCPY_PEER 1
+#define VERIFY_DATA 0
 
 #define NCCLCHECK(cmd) do {                         \
   ncclResult_t res = cmd;                           \
@@ -25,7 +26,7 @@ template < class T >
 struct GpuComm {
 
   ncclUniqueId ncclId;
-  size_t nGpus, bufSize;
+  size_t nGpus, maxSize, curSize; // total and current data transfer size
   std::vector< int > gpus;
   std::vector< hipStream_t > streams;
   std::vector< T *> sendBufs, recvBufs;
@@ -34,9 +35,9 @@ struct GpuComm {
   std::vector< std::thread > threads;
 
 public:
-  GpuComm(size_t nGpus_, size_t bufSize_) : nGpus(nGpus_), bufSize(bufSize_),
-      gpus(nGpus_), streams(nGpus_), sendBufs(nGpus_), recvBufs(nGpus_),
-      comms(nGpus_), hostBuf(nGpus_ * bufSize_)
+  GpuComm(size_t nGpus_, size_t maxSize_) : nGpus(nGpus_), maxSize(maxSize_),
+      curSize(maxSize_), gpus(nGpus_), streams(nGpus_), sendBufs(nGpus_), recvBufs(nGpus_),
+      comms(nGpus_), hostBuf(maxSize_ * 2) // one for reference solution
   { 
     NCCLCHECK(ncclGetUniqueId(&ncclId));
 
@@ -45,12 +46,12 @@ public:
       gpus[i] = i;
       CHK(cudaSetDevice(gpus[i]));
 
-      int flags = //hipDeviceMallocDefault;
+      int flags = hipDeviceMallocDefault;
                   //hipDeviceMallocFinegrained;
-                   hipDeviceMallocUncached;
+                  // hipDeviceMallocUncached;
                   // hipMallocSignalMemory;
-      CHK(hipExtMallocWithFlags((void **)(sendBufs.data() + i), bufSize*sizeof(T), flags));
-      CHK(hipExtMallocWithFlags((void **)(recvBufs.data() + i), bufSize*sizeof(T), flags));
+      CHK(hipExtMallocWithFlags((void **)(sendBufs.data() + i), maxSize*sizeof(T), flags));
+      CHK(hipExtMallocWithFlags((void **)(recvBufs.data() + i), maxSize*sizeof(T), flags));
       CHK(cudaStreamCreateWithFlags(streams.data() + i, cudaStreamNonBlocking));
   
   //     if (streamnull)
@@ -96,24 +97,43 @@ public:
 #undef OO
   }
 
-  void initBuf(T *buf, const T& val) {
-    std::fill(buf, buf + bufSize, val);
+  T getElement(int device, size_t idx) {
+    return static_cast<T>(100.0f*std::sin((float)idx*2*M_PI/(device+2)));
+  }
+
+  void initBuf(int device, T *gpubuf) {
+    auto ref = hostBuf.data();
+#if VERIFY_DATA
+    for(size_t i = 0; i < maxSize; i++) {
+      ref[i] = getElement(device, i);
+    }
+#else
+    std::fill(ref, ref + maxSize, T(device));
+#endif
+    CHK(cudaMemcpy(gpubuf, ref, maxSize*sizeof(T), cudaMemcpyHostToDevice));
+  }
+
+  int sendPeer(int i) {
+    return (i + 1)%nGpus;
+  }
+  int recvPeer(int i) {
+    return (i - 1 + nGpus)%nGpus;
   }
 
   void init() {
     for (int i = 0; i < nGpus; i++) 
     {
+      VLOG("Allocating buffers and data init for GPU " << i);
       gpus[i] = i;
       CHK(cudaSetDevice(gpus[i]));
-      CHK(cudaMemset(recvBufs[i], 0, bufSize));
-      initBuf(sendBufs[i], T(i));
+      CHK(cudaMemset(recvBufs[i], 0, maxSize));
+      initBuf(gpus[i], sendBufs[i]);
 #if USE_MEMCPY_PEER
-      int peer = (i + 1) % nGpus, enable = 0;
+      int peer = sendPeer(i), enable = 0;
       CHK(cudaDeviceCanAccessPeer(&enable, i, peer));
       if(enable == 0) {
         CHK(cudaDeviceEnablePeerAccess(peer, 0));
       }
-      VLOG("Can access peer: " << enable);
 #endif
     }
     CHK(cudaDeviceSynchronize());
@@ -121,11 +141,18 @@ public:
 
   void verify(int i) {
     int dev;
-    auto dst = hostBuf.data() + i * bufSize;
+    auto dst = hostBuf.data();
     NCCLCHECK(ncclCommCuDevice(comms[i], &dev));
     CHK(cudaSetDevice(dev));
-    CHK(cudaMemcpy(dst, recvBufs[i], bufSize*sizeof(T), cudaMemcpyDeviceToHost));
-    VLOG("Device " << dev << " verify: element: " << dst[0]);
+    CHK(cudaMemcpy(dst, recvBufs[i], curSize*sizeof(T), cudaMemcpyDeviceToHost));
+    VLOG("Device " << dev << " verifying");
+    for(size_t j = 0; j < curSize; j++) {
+      auto truth = getElement(recvPeer(dev), j);
+      if(dst[j] != truth) {
+        //PRINTZ("%d: %f %f", j, truth, dst[j]);
+        ThrowError< 256 >("%d: verify failed truth: %f gpu: %f", j, truth, dst[j]);
+      }
+    }
   }
 
   void run_single_gpu_memcpy(int i) {
@@ -133,14 +160,13 @@ public:
     //NCCLCHECK(ncclCommCount(comms[i], &nRanks));
     int dev = i;
     CHK(cudaSetDevice(dev));
-    int sendPeer = (i + 1) % nGpus;
-    CHK(cudaMemcpyPeerAsync(recvBufs[sendPeer],
-        sendPeer, sendBufs[i], i, bufSize*sizeof(T), streams[i]));
+    int peer = sendPeer(i);
+    CHK(cudaMemcpyPeerAsync(recvBufs[peer],
+        peer, sendBufs[i], i, curSize*sizeof(T), streams[i]));
   }
 
   void run_single_gpu(int i) {
 
-    int count = bufSize;
     auto type = getNcclType();
     int nRanks, rank, dev;
 
@@ -149,21 +175,24 @@ public:
     CHK(cudaSetDevice(dev));
 
     ncclCommUserRank(comms[i], &rank);
-    int recvPeer = (rank-1+nRanks) % nRanks;
-    int sendPeer = (rank+1) % nRanks;
-
+    int recvP = recvPeer(rank), sendP = sendPeer(rank);
     // VLOG(std::hex << std::this_thread::get_id() << std::dec << 
     //       ": Running thread with rank: " << rank << " peers: " 
-    //       << recvPeer << " " << sendPeer);
+    //       << recvP << " " << sendP);
 
     NCCLCHECK(ncclGroupStart());
-    NCCLCHECK(ncclSend(sendBufs[i], count, type, sendPeer, comms[i], streams[i]));
-    NCCLCHECK(ncclRecv(recvBufs[i], count, type, recvPeer, comms[i], streams[i]));
+    NCCLCHECK(ncclSend(sendBufs[i], curSize, type, sendP, comms[i], streams[i]));
+    NCCLCHECK(ncclRecv(recvBufs[i], curSize, type, recvP, comms[i], streams[i]));
     NCCLCHECK(ncclGroupEnd());
   }
 
-  void run(bool verifyData = false) 
+  void run(size_t numElems, bool verifyData = false) 
   {
+    curSize = numElems;
+    if(curSize > maxSize) {
+       ThrowError< 256 >("numElems must be <= maxSize");
+    }
+
     NCCLCHECK(ncclGroupStart());
     for (int i = 0; i < nGpus; i++) {
 #if USE_MEMCPY_PEER
@@ -186,31 +215,50 @@ public:
 };
 
 template < class T >
-void runRCCLTest(size_t len)
+void runRCCLTest(size_t elemsMin, size_t elemsMax)
 {
   int nGpus = 0, nwarmups = 5, niters = 10;
-  size_t nbytes = len * sizeof(T);
   CHK(hipGetDeviceCount(&nGpus));
-  VLOG("Num devices: " << nGpus << ", data to be sent: " << (double)nbytes/(1024*1024) << " Mb");
+  VLOG("Num devices: " << nGpus << "; max data size: " << (double)(elemsMax*sizeof(T))/(1024*1024) << 
+        " Mb; neighbour exchange with "
+#if USE_MEMCPY_PEER
+      "hipMemcpyPeerAsync"
+#else
+      "RCCL"
+#endif
+      );
 
-  GpuComm<T> obj(nGpus, len);
+  GpuComm<T> obj(nGpus, elemsMax);
   obj.init();
 
-  for(int i = 0; i <nwarmups; i++) { // warm-up
-    obj.run(true);
+  for(int i = 0; i < (nwarmups+1)/2; i++) { // warm-up
+    obj.run(elemsMax);
+  }
+  for(int i = 0; i < nwarmups/2; i++) { // warm-up
+    obj.run(elemsMin);
   }
 
-  CPU_BEGIN_TIMING(sendrecv);
-  for(int i = 0; i < niters; i++) { 
-    obj.run(false);
+  for(size_t sz = elemsMin; sz <= elemsMax; ) {
+    CPU_BEGIN_TIMING(sendrecv);
+    for(int i = 0; i < niters; i++) { 
+      obj.run(sz);
+    }
+    auto tnow = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> ms = tnow - z1_sendrecv;
+    size_t bytes = sz*sizeof(T);
+    double avgMs = ms.count() / niters,
+          baseBw = (double)bytes / 1.0E6 / avgMs;
+    PRINTZ("Data size: %.2f Mb; time elapsed: %.3f ms, bandwidth: %.3f Gb/s", 
+            (double)bytes/(1024*1024), avgMs, baseBw);
+    if(sz == elemsMax)
+      break;
+    sz = std::min(sz * 3 / 2, elemsMax);
   }
-  auto tnow = std::chrono::high_resolution_clock::now();
-  std::chrono::duration<double, std::milli> ms = tnow - z1_sendrecv;
-  double avgMs = ms.count() / niters;
-  double baseBw = (double)nbytes / 1.0E6 / avgMs;
 
-  PRINTZ("Time elapsed: %.3f ms, bandwidth: %.3f Gb/s", avgMs, baseBw);
-
+#if VERIFY_DATA
+  obj.setCurrentSize(elemsMin);
+  obj.run(true); // last run to verify data
+#endif
   
 //      } else {
 //        NCCLCHECK(ncclGroupStart());
@@ -230,50 +278,14 @@ void runRCCLTest(size_t len)
 //        }
 //        NCCLCHECK(ncclGroupEnd());
 //      }
- 
-  // GPUStream s[5];
-  // T *devSrc = nullptr;
-  // uint32_t bytes = 181403648;
-  // CHK(cudaMalloc((void**)&devSrc, bytes))
-
-  // std::vector< T > hosts[5];
-  // for(auto& H : hosts) {
-  //   H.resize(N);
-  // }
-
-  // for(int i = 0; i < 1000; i++) {
-  
-  // auto& hostD = hosts[i % 5];
-  // for(uint32_t i = 0; i < N; i++) {
-  //   hostD[i] = i+1;
-  // }
-
-  // VLOG("memcpy " << hostD.data() << " -> " << devSrc);
-  // CHK(hipMemcpyHtoDAsync(
-  //       devSrc, hostD.data(), N * sizeof(T), s[0].get()))
-  // //CHK(hipStreamSynchronize(s1.get()))
-
-
-  // HVector< T > zz(16);
-  // ReduceSumKernel<<<1, 128, 0, s[0].get()>>>(devSrc, N, zz.devPtr);
-  // //CHK(hipStreamSynchronize(s2.get()));    
-
-  // zz.copyDToH();
-  // for(int i = 0; i < 1; i++) {
-  //    VLOG(i << ": reduce result " << zz[i]);
-  // }
-  // } // for
-
-  // CHK(cudaFree(devSrc))
-
-
 }
-
 // NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,COLL
 
 int main() try 
 {
-   runRCCLTest<float>(16*1024*1024);
+  DeviceInit(0);
+  size_t sMin = 1024*1024, sMax = 128*1024*1024;
+  runRCCLTest<float>(sMin, sMax);
 }
 catch(std::exception& ex) {
   VLOG("Exception: " << ex.what());
