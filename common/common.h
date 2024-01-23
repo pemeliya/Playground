@@ -64,6 +64,7 @@
 
 #define VLOG(x) std::cerr << x << std::endl;
 #define PRINTZ(fmt, ...) fprintf(stderr, fmt"\n", ##__VA_ARGS__)
+#define BUGTRACE std::cerr << std::this_thread::get_id() << ": " << __FILE__":" << __LINE__ << std::endl;
 
 #define CHK(x) if(auto res = (x); res != cudaSuccess) { \
   ThrowError<256>(#x " failed with: '%s'(%d) at %s:%d\n", cudaGetErrorString(res),  \
