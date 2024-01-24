@@ -29,6 +29,7 @@
 #define cudaFreeHost hipHostFree
 #define cudaMemcpyHostToDevice hipMemcpyHostToDevice
 #define cudaMemcpyDeviceToHost hipMemcpyDeviceToHost
+#define cudaMemcpyDeviceToDevice hipMemcpyDeviceToDevice
 #define cudaSuccess hipSuccess
 #define cudaGetLastError hipGetLastError
 #define cudaGetErrorName hipGetErrorName

@@ -78,6 +78,9 @@ struct ThreadPool {
     m_finishedCv.wait(lock, [this](){
       return !m_isRunning || m_arrived == m_currentJobID;
     });
+    if(m_threadException) {
+        throw std::runtime_error("Thread exception!");
+    }
   }
 
   ~ThreadPool() try {
@@ -120,12 +123,14 @@ private:
   }
   catch(std::exception& ex) {
     VLOG("Thread exception: " << ex.what());
-    m_isRunning = false;
+    m_isRunning = false, m_threadException = true;
     m_jobCv.notify_all();
+    m_finishedCv.notify_one();
   }
 
   uint32_t m_currentJobID = 0, m_arrived = 0;
   bool m_isRunning = true, m_jobFinished = false;
+  bool m_threadException = false;
   JobFunc m_func;
   std::mutex m_jobMtx, m_finishedMtx;
   std::condition_variable m_jobCv, m_finishedCv;
