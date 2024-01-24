@@ -11,7 +11,7 @@
 #include "common/threading.hpp"
 #include "common/example_utils.hpp"
 
-#define USE_MEMCPY_PEER 0
+#define USE_MEMCPY_PEER 1
 #define VERIFY_DATA 1
 
 #define NCCLCHECK(cmd) \
@@ -42,15 +42,21 @@ class GpuComm {
   Barrier m_barrier;
   ThreadPool m_pool;
 
-  double m_splitFactor = 0.33; // this much of traffic is sent to target GPUs directly
-  uint32_t m_numExtraPeers = 3; // if zero, all traffic is sent directly
+  uint32_t m_numExtraPeers = 1; // if zero, all traffic is sent directly
+  double m_splitFactor = 0.5; // this much of traffic is sent to target GPUs directly
 
   std::vector< size_t > m_offsets, m_sizes;
 
 public:
   GpuComm(size_t nGpus, size_t maxElems) : m_nGpus(nGpus), m_maxElems(maxElems),
       m_curElems(maxElems), m_infos(nGpus), m_barrier(nGpus), m_pool(nGpus)
-  { }
+  { 
+    if(m_numExtraPeers == 0) {
+      m_splitFactor = 1.0; 
+    } else if(m_numExtraPeers >= m_nGpus-1) {
+      throw std::runtime_error("Too many extra peers!");
+    }
+  }
 
   ~GpuComm() {
     for(auto& info : m_infos) {
@@ -164,34 +170,42 @@ public:
   {
     auto& info = m_infos[id];
 #if USE_MEMCPY_PEER
-    int peer = sendPeer(id);
-    CHK(cudaMemcpyPeerAsync(m_recvBufs[peer],
-        peer, m_sendBufs[id], id, m_curElems*sizeof(T), m_streams[id]));
-#else
+    // int peer = sendPeer(id);
+    // CHK(cudaMemcpyPeerAsync(m_recvBufs[peer],
+    //     peer, m_sendBufs[id], id, m_curElems*sizeof(T), m_streams[id]));
+    if(step == 0) {
+      for(int i = 0; i <= m_numExtraPeers; i++) {
+        int peer = (id + i + 1) % m_nGpus;
+        CHK(cudaMemcpyPeerAsync(m_infos[peer].recvBuf + m_offsets[i],
+           peer, info.sendBuf + m_offsets[i], id, m_sizes[i]*sizeof(T), info.stream));
+      }
+    } else {
+      for(int i = 1; i <= m_numExtraPeers; i++) {
+
+         CHK(cudaMemcpyAsync(info.sendBuf + m_offsets[i], info.recvBuf + m_offsets[i],
+            m_sizes[i]*sizeof(T), cudaMemcpyDeviceToDevice, info.stream));
+
+        int peer = (id - i + m_nGpus) % m_nGpus;
+        CHK(cudaMemcpyPeerAsync(m_infos[peer].recvBuf + m_offsets[i],
+           peer, info.sendBuf + m_offsets[i], id, m_sizes[i]*sizeof(T), info.stream));
+      }
+    }
+#else // USE_MEMCPY_PEER
     auto type = getNcclType();
     int rank;
     // NCCLCHECK(ncclCommCount(m_comms[i], &nRanks));
     // NCCLCHECK(ncclCommCuDevice(m_comms[i], &dev));
     ncclCommUserRank(info.comm, &rank);
-    int recvP = recvPeer(rank), sendP = sendPeer(rank);
-    // VLOG(std::hex << std::this_thread::get_id() << std::dec << 
-    //       ": Running thread with rank: " << rank << " peers: " 
-    //       << recvP << " " << sendP);
-
     NCCLCHECK(ncclGroupStart());
     if(step == 0) {
-      
-      // NCCLCHECK(ncclSend(m_sendBufs[i], m_curElems, type, sendP, m_comms[i], m_streams[i]));
-      // NCCLCHECK(ncclRecv(m_recvBufs[i], m_curElems, type, recvP, m_comms[i], m_streams[i]));
       for(int i = 0; i <= m_numExtraPeers; i++) {
-        sendP = (rank + i + 1) % m_nGpus;
+        int sendP = (rank + i + 1) % m_nGpus,
+            recvP = (rank - 1 - i + m_nGpus) % m_nGpus;
         NCCLCHECK(ncclSend(info.sendBuf + m_offsets[i], 
               m_sizes[i], type, sendP, info.comm, info.stream));
 
-        recvP = (rank - 1 - i + m_nGpus) % m_nGpus;
         NCCLCHECK(ncclRecv(info.recvBuf + m_offsets[i], 
               m_sizes[i], type, recvP, info.comm, info.stream));
-//        VLOG(id << "  " << sendP);
       }
     } else {
       // std::lock_guard _(m_verifyMtx);
@@ -200,13 +214,11 @@ public:
         CHK(cudaMemcpyAsync(info.sendBuf + m_offsets[i], info.recvBuf + m_offsets[i],
             m_sizes[i]*sizeof(T), cudaMemcpyDeviceToDevice, info.stream));
 
-        sendP = (rank - i + m_nGpus) % m_nGpus;
-        recvP = (rank + i) % m_nGpus;
-        // VLOG(id << " gpu sends back to " << sendP << " and recv from " << recvP);
+        int sendP = (rank - i + m_nGpus) % m_nGpus,
+            recvP = (rank + i) % m_nGpus;
         // but you have to swap recv and send bufs here !!!
         NCCLCHECK(ncclSend(info.sendBuf + m_offsets[i], 
                m_sizes[i], type, sendP, info.comm, info.stream));
-
         NCCLCHECK(ncclRecv(info.recvBuf + m_offsets[i], 
                m_sizes[i], type, recvP, info.comm, info.stream));
       }
@@ -228,8 +240,8 @@ public:
     m_offsets[0] = 0;
     m_sizes[0] = ((size_t)(m_curElems * m_splitFactor) + 3) & ~3;
     // remaining is to be split evenly between m_numExtraPeers
-    size_t remaining = m_curElems - m_sizes[0], 
-            step = (remaining / m_numExtraPeers + 3) & ~3, ofs = m_sizes[0];
+    size_t remaining = m_curElems - m_sizes[0], ofs = m_sizes[0],
+        step = m_numExtraPeers > 0 ? (remaining / m_numExtraPeers + 3) & ~3 : 0;
     for(uint32_t i = 1; i <= m_numExtraPeers; i++, ofs += step) {
       m_offsets[i] = ofs;
       m_sizes[i] = step;
@@ -237,7 +249,7 @@ public:
     m_sizes[m_numExtraPeers] = m_curElems - m_offsets[m_numExtraPeers];
     for(uint32_t i = 0; i <= m_numExtraPeers; i++) {
       PRINTZ("%d: ofs: %lX; size: %lX; sum: %lX", 
-      i, m_offsets[i], m_sizes[i], m_offsets[i] + m_sizes[i]);
+            i, m_offsets[i], m_sizes[i], m_offsets[i] + m_sizes[i]);
     }
     
     m_pool.runJob([&,this](int id) {
@@ -254,7 +266,8 @@ public:
     for(int i = 0; i < numIters; i++) {
       run_single_gpu(id, 0);
       CHK(cudaStreamSynchronize(info.stream));
-    //m_barrier.wait(); // wait all threads to arrive here before starting timing
+      
+      m_barrier.wait(); // wait all threads to arrive here before starting timing
       run_single_gpu(id, 1);
       CHK(cudaStreamSynchronize(info.stream));
     } // for
@@ -324,7 +337,7 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
 int main() try 
 {
   DeviceInit(0);
-  size_t sMin = 32*1024*1024, sMax = 32*1024*1024;
+  size_t sMin = 4*1024*1024, sMax = 64*1024*1024;
   runRCCLTest<float>(sMin, sMax);
 }
 catch(std::exception& ex) {
