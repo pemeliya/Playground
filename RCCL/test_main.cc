@@ -13,10 +13,10 @@
 #include "common/example_utils.hpp"
 #include "common/roc_profiler.h"
 
-#define USE_MEMCPY_PEER 1
+#define USE_MEMCPY_PEER 0
 #define VERIFY_DATA 1
 
-#define NCCLCHECK(cmd) \
+#define CHKNCCL(cmd) \
   if(auto res = (cmd); res != ncclSuccess) {           \
     PRINTZ("Test NCCL failure %s:%d '%s'",              \
         __FILE__,__LINE__,ncclGetErrorString(res));     \
@@ -85,7 +85,7 @@ class GpuComm {
   ThreadPool m_pool;
   Matrix<Node> m_stageA, m_stageB; // "topology graphs" for stage1 all-to-all and stage 2
 
-  constexpr static uint32_t s_nExtraPeers = 2; // if zero, all traffic is sent directly
+  constexpr static uint32_t s_nExtraPeers = 5; // if zero, all traffic is sent directly
   constexpr static double s_splitFactor = 0.2; // this much of traffic is sent to target GPUs directly
   constexpr static uint32_t s_bogus = 0xFFFFFFFFu; // to catch uninitialized entries
 
@@ -126,18 +126,6 @@ public:
     OO(float, ncclFloat32);
     OO(double, ncclFloat64);
 #undef OO
-  }
-
-  T getElement(int device, size_t idx) {
-    //return static_cast<T>(100.0f*std::sin((float)idx*2*M_PI/(device+2)));
-    return static_cast<T>(device);
-  }
-
-  int sendPeer(int i) {
-    return (i + 1)%m_nGpus;
-  }
-  int recvPeer(int i) {
-    return (i - 1 + m_nGpus)%m_nGpus;
   }
 
   friend std::ostream& operator<<(std::ostream& ofs, const Node& n) {
@@ -198,26 +186,24 @@ public:
   std::vector< uint32_t > permuteOp() {
     std::vector< uint32_t > permute(m_nGpus);
     for(uint32_t i = 0; i < m_nGpus; i++) {
-      // GPU[i]:     0, 1, 2, 3, 4, 5, 6, 7
-      // permute[i]: 1, 2, 3, 4, 5, 6, 7, 0
+      // this is cyclic neighbor exchange OP
       permute[i] = (i + 1) % m_nGpus; // defines to which node GPU[i] should send its data
     }
-
+#if 0
     std::random_device rd;
     std::mt19937 g(rd());
     using Distr = std::uniform_int_distribution<uint32_t>;
-    using PP = typename Distr::param_type;
+    using PP = Distr::param_type;
     Distr D;
     for (uint32_t i = m_nGpus - 1; (int)i > 0; i--)
-    {
-      while(1) {
-        uint32_t idx = D(g, PP(0, i));
-        if(permute[idx] != i) {
-          std::swap(permute[i], permute[idx]);
-          break;
-        }
+    while(1) {
+      uint32_t idx = D(g, PP(0, i));
+      if(permute[idx] != i) {
+        std::swap(permute[i], permute[idx]);
+        break;
       }
     }
+#endif
     return permute;
   }
 
@@ -268,13 +254,16 @@ public:
     outputDot();
   }
 
+  T getElement(int device, size_t idx) {
+    //return static_cast<T>(100.0f*std::sin((float)idx*2*M_PI/(device+2)));
+    return static_cast<T>(device);
+  }
+
   void init() 
   {
 #if !USE_MEMCPY_PEER
-    NCCLCHECK(ncclGetUniqueId(&m_ncclId));
+    CHKNCCL(ncclGetUniqueId(&m_ncclId));
 #endif
-    initExtraPeers();
-    throw "oops";
 
     m_pool.runJob([this](int id) {
       auto& info = m_infos[id];
@@ -316,9 +305,10 @@ public:
         CHK(cudaDeviceEnablePeerAccess(peer, 0));
       }
 #else
-      NCCLCHECK(ncclCommInitRank(&info.comm, m_nGpus, m_ncclId, id));
+      CHKNCCL(ncclCommInitRank(&info.comm, m_nGpus, m_ncclId, id));
 #endif
     }); // runJob
+    initExtraPeers();
     CHK(cudaDeviceSynchronize());
   }
 
@@ -329,9 +319,11 @@ public:
     }
     auto dst = m_hostBuf.data();
     CHK(cudaMemcpy(dst, m_infos[id].recvBuf, m_curElems*sizeof(T), cudaMemcpyDeviceToHost));
-    VLOG("Device " << id << " verifying");
+    // Node id should receive original data from node m_stageA[id][0].in
+    auto t = m_stageA[id][0].in;
+    VLOG("Device " << id << " verifying: expecting data from node: " << t);
     for(uint32_t j = 0, num = 0; j < m_curElems; j++) {
-      auto truth = getElement(recvPeer(id), j);
+      auto truth = getElement(t, j);
       if(dst[j] != truth) {
         //ThrowError<>("%d: verify failed truth: %f gpu: %f", j, truth, dst[j]);
         PRINTZ("%X: verify failed truth: %f gpu: %f", j, truth, dst[j]);
@@ -341,14 +333,15 @@ public:
     }
   }
 
-  void run_single_gpu(int id, int step) 
+  void run_single_gpu(int id, int stage) 
   {
     auto& info = m_infos[id];
+    const auto& V = stage == 0 ? m_stageA[id] : m_stageB[id];
 #if USE_MEMCPY_PEER
     // int peer = sendPeer(id);
     // CHK(cudaMemcpyPeerAsync(m_recvBufs[peer],
     //     peer, m_sendBufs[id], id, m_curElems*sizeof(T), m_streams[id]));
-    if(step == 0) {
+    if(stage == 0) {
       for(int i = 0; i <= s_nExtraPeers; i++) {
         int peer = (id + i + 1) % m_nGpus;
         CHK(cudaMemcpyPeerAsync(m_infos[peer].recvBuf + m_offsets[i],
@@ -368,18 +361,19 @@ public:
 #else // USE_MEMCPY_PEER
     auto type = getNcclType();
     int rank;
-    // NCCLCHECK(ncclCommCount(m_comms[i], &nRanks));
-    // NCCLCHECK(ncclCommCuDevice(m_comms[i], &dev));
+    // CHKNCCL(ncclCommCount(m_comms[i], &nRanks));
+    // CHKNCCL(ncclCommCuDevice(m_comms[i], &dev));
     ncclCommUserRank(info.comm, &rank);
-    NCCLCHECK(ncclGroupStart());
-    if(step == 0) {
+    CHKNCCL(ncclGroupStart());
+    if(stage == 0) {
       for(int i = 0; i <= s_nExtraPeers; i++) {
-        int sendP = (rank + i + 1) % m_nGpus,
-            recvP = (rank - 1 - i + m_nGpus) % m_nGpus;
-        NCCLCHECK(ncclSend(info.sendBuf + m_offsets[i], 
+        // int sendP = (rank + i + 1) % m_nGpus,
+        //     recvP = (rank - 1 - i + m_nGpus) % m_nGpus;
+        int sendP = V[i].out, recvP = V[i].in;
+        CHKNCCL(ncclSend(info.sendBuf + m_offsets[i], 
               m_sizes[i], type, sendP, info.comm, info.stream));
 
-        NCCLCHECK(ncclRecv(info.recvBuf + m_offsets[i], 
+        CHKNCCL(ncclRecv(info.recvBuf + m_offsets[i], 
               m_sizes[i], type, recvP, info.comm, info.stream));
       }
     } else {
@@ -389,16 +383,17 @@ public:
         CHK(cudaMemcpyAsync(info.sendBuf + m_offsets[i], info.recvBuf + m_offsets[i],
             m_sizes[i]*sizeof(T), cudaMemcpyDeviceToDevice, info.stream));
 
-        int sendP = (rank - i + m_nGpus) % m_nGpus,
-            recvP = (rank + i) % m_nGpus;
+        int sendP = V[i-1].out, recvP = V[i-1].in;
+        // int sendP = (rank - i + m_nGpus) % m_nGpus,
+        //     recvP = (rank + i) % m_nGpus;
         // but you have to swap recv and send bufs here !!!
-        NCCLCHECK(ncclSend(info.sendBuf + m_offsets[i], 
+        CHKNCCL(ncclSend(info.sendBuf + m_offsets[i], 
                m_sizes[i], type, sendP, info.comm, info.stream));
-        NCCLCHECK(ncclRecv(info.recvBuf + m_offsets[i], 
+        CHKNCCL(ncclRecv(info.recvBuf + m_offsets[i], 
                m_sizes[i], type, recvP, info.comm, info.stream));
       }
     }
-    NCCLCHECK(ncclGroupEnd());
+    CHKNCCL(ncclGroupEnd());
 #endif // USE_MEMCPY_PEER
   }
 
@@ -476,6 +471,7 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
 {
   int m_nGpus = 0, nwarmups = 5, niters = 10;
   CHK(hipGetDeviceCount(&m_nGpus));
+  // m_nGpus = 4;
   VLOG("Num devices: " << m_nGpus << "; max data size: " << (double)(elemsMax*sizeof(T))/(1024*1024) << 
         " Mb; neighbour exchange with "
 #if USE_MEMCPY_PEER
@@ -494,6 +490,7 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
   obj.run(elemsMax, (nwarmups+1)/2);
   obj.run(elemsMin, nwarmups/2);
 
+#if 0
   {
     void *gpuMem;
     std::vector< uint8_t > zz(16);
@@ -509,9 +506,9 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
   // hipMalloc((void**)&gpuMem, zz.size());
   // hipMemcpy(gpuMem, zz.data(), zz.size(), cudaMemcpyHostToDevice);
   sess.stop();
-
   (void)hipFree(gpuMem);
   }
+#endif
 
   for(size_t sz = elemsMin; sz <= elemsMax; ) {
     obj.run(sz, niters, true);
@@ -521,11 +518,11 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
   }
   
 //      } else {
-//        NCCLCHECK(ncclGroupStart());
+//        CHKNCCL(ncclGroupStart());
 //        for (int ii=0; ii<m_nGpus*nThreads; ii++) {
 //          HIPCHECK(hipSetDevice(m_gpus[ii]));
 // 	 if (!enable_multiranks) {
-// 	   NCCLCHECK(ncclCommInitRank(m_comms+ii, ncclProcs*nThreads*m_nGpus, ncclId, proc*nThreads*m_nGpus+ii));
+// 	   CHKNCCL(ncclCommInitRank(m_comms+ii, ncclProcs*nThreads*m_nGpus, ncclId, proc*nThreads*m_nGpus+ii));
 // 	 }
 }
 // NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,COLL

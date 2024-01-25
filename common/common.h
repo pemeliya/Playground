@@ -92,7 +92,7 @@ constexpr uint32_t bit_ceil(uint32_t n) {
 
 } // namespace std
 
-template < uint32_t SZ >
+template < uint32_t SZ = 256 >
 [[noreturn]] void ThrowError(const char *fmt, ...) {
   static char buf[SZ];
   va_list args;
