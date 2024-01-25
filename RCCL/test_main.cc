@@ -85,16 +85,17 @@ class GpuComm {
   ThreadPool m_pool;
   Matrix<Node> m_stageA, m_stageB; // "topology graphs" for stage1 all-to-all and stage 2
 
-  constexpr static uint32_t s_nExtraPeers = 1; // if zero, all traffic is sent directly
+  constexpr static uint32_t s_nExtraPeers = 2; // if zero, all traffic is sent directly
   constexpr static double s_splitFactor = 0.2; // this much of traffic is sent to target GPUs directly
+  constexpr static uint32_t s_bogus = 0xFFFFFFFFu; // to catch uninitialized entries
 
   std::vector< size_t > m_offsets, m_sizes;
 
 public:
   GpuComm(size_t nGpus, size_t maxElems) : m_nGpus(nGpus), m_maxElems(maxElems),
       m_curElems(maxElems), m_infos(nGpus), m_barrier(nGpus), m_pool(nGpus),
-      m_stageA(nGpus, s_nExtraPeers+1, Node{0xFF,0xFF}), 
-      m_stageB(nGpus, s_nExtraPeers, Node{0xFF,0xFF})
+      m_stageA(nGpus, s_nExtraPeers+1, Node{s_bogus,s_bogus}), 
+      m_stageB(nGpus, s_nExtraPeers, Node{s_bogus,s_bogus})
   { 
     if((s_nExtraPeers == 0 && s_splitFactor != 1.0) || s_nExtraPeers >= m_nGpus-1) {
       throw std::runtime_error("Wrong number of extra peers!");
@@ -143,27 +144,30 @@ public:
     return ofs << '(' << n.in << ',' << n.out << ')';
   }
 
-  void outputDot(int which) {
+  //! https://visjs.github.io/vis-network/examples/network/edgeStyles/smoothWorldCup.html
+  //! neato topology.dot -Tpng > topology.png 
+  void outputDot() {
     static const char *colors[] = {
-    "aquamarine", "cornflowerblue", "chocolate1", "darkgreen",
-    "darkorchid", "deeppink", "fuchsia", "goldenrod2"};
+        "aquamarine", "cornflowerblue", "chocolate1", "darkgreen",
+        "darkorchid", "deeppink", "fuchsia", "goldenrod2"};
     uint32_t ncolors = sizeof(colors)/sizeof(colors[0]);
 
-    std::string fname = which == 0 ? "stage1.dot" : "stage2.dot";
     auto& m = m_stageA;
-    std::ofstream ofs(fname);
-    // neato stage1.dot -Tpng > stage1.png 
-    ofs << "digraph G {\n";
+    std::ofstream ofs("topology.dot");
+    ofs << "digraph G {\nsplines=true;\noverlap=scale\n";
 
-    float R = 5, x0 = 10, y0 = 10, da = M_PI*2.0f/m.numRows();
+    float R = 5, x0 = 10, y0 = 10, da = -M_PI*2.0f/m.numRows();
     for(uint32_t i = 0; i < m.numRows(); i++) {
       float xf = x0 + R*std::cos(da*i + M_PI/2),
             yf = y0 + R*std::sin(da*i + M_PI/2);
-      ofs << i << " [pos=\"" << xf << ',' << yf << "!\"];\n";
+      auto C = colors[i % ncolors];
+      ofs << i << " [pos=\"" << xf << ',' << yf << 
+            "!\", style=filled,color=\"" << C << "\",shape=circle];\n";
     }
     for(uint32_t i = 0; i < m.numRows(); i++) {
       for(uint32_t j = 0; j < m.numCols(); j++) {
         ofs << i << " -> " << m[i][j].out;
+        // check all GPUs and find the one having GPU i in (j+1)th position
         ofs << " [color=" << colors[i % ncolors];
         if(j == 0) {
           ofs << ",penwidth=3.0];\n";
@@ -176,34 +180,58 @@ public:
     for(uint32_t i = 0; i < m2.numRows(); i++) {
       for(uint32_t j = 0; j < m2.numCols(); j++) {
         // how the data comes to node i at position j ??
-        auto t = m[i][j].in;
+        uint32_t t = s_bogus;
+        for(uint32_t k = 0; k < m.numRows(); k++) {
+          if(k != i && m[k][j+1].out == i) {
+            t = k; break;
+          }
+        }
+        auto C = t == s_bogus ? "black" : colors[t % ncolors];
         ofs << i << " -> " << m2[i][j].out;
-        ofs << " [color=" << colors[t % ncolors] <<
+        ofs << " [color=" << C <<
         ",style=\"dashed\",penwidth=1.5];\n";
       }
     }
     ofs << '}';
   }
 
-  void initExtraPeers() {
-
-    // matrix1: stage1 send to j, recv from k
-    // matrix2: stage2 same ..
-
+  std::vector< uint32_t > permuteOp() {
     std::vector< uint32_t > permute(m_nGpus);
     for(uint32_t i = 0; i < m_nGpus; i++) {
       // GPU[i]:     0, 1, 2, 3, 4, 5, 6, 7
       // permute[i]: 1, 2, 3, 4, 5, 6, 7, 0
       permute[i] = (i + 1) % m_nGpus; // defines to which node GPU[i] should send its data
     }
+
+    std::random_device rd;
+    std::mt19937 g(rd());
+    using Distr = std::uniform_int_distribution<uint32_t>;
+    using PP = typename Distr::param_type;
+    Distr D;
+    for (uint32_t i = m_nGpus - 1; (int)i > 0; i--)
+    {
+      while(1) {
+        uint32_t idx = D(g, PP(0, i));
+        if(permute[idx] != i) {
+          std::swap(permute[i], permute[idx]);
+          break;
+        }
+      }
+    }
+    return permute;
+  }
+
+  void initExtraPeers() {
+
+    auto permute = permuteOp();
     for(uint32_t i = 0; i < m_nGpus; i++) {
+      VLOG(i << " permute: " << permute[i]);
       m_stageA[i][0].out = permute[i];  // gpu i sends to gpu permute[i]
       m_stageA[permute[i]][0].in = i;   // gpu permute[i] receives from gpu i
     }
 
     // the # of incoming links and outgoing links (the target link is already counted)
-    std::vector< uint32_t > inA(m_nGpus, 1), outA(m_nGpus, 1),
-                            inB(m_nGpus, 0), outB(m_nGpus, 0);
+    std::vector< uint32_t > inA(m_nGpus, 1), outA(m_nGpus, 1);
     for(uint32_t i = 0; i < m_nGpus; i++) {
 
       auto t = m_stageA[i][0].out; // target node for GPU i
@@ -214,33 +242,30 @@ public:
         if(i == j || t == j || inA[j] > s_nExtraPeers) { 
           continue;
         }
-        // VLOG(i << "," << j << " in/out: " << incoming[j] << ", " << outgoing[i]);
-        // std::ostringstream oss;
-        // oss << '[';
-        // for(auto o : outgoing) {
-        //   oss << o << ",";
-        // }
-        // oss << ']';
-        // VLOG("outgoing: " << oss.str());
-        // oss.str("");
-        // oss << '[';
-        // for(auto o : incoming) {
-        //   oss << o << ",";
-        // }
-        // oss << ']';
-        // VLOG("incoming: " << oss.str());
-        m_stageA[i][outA[i]++].out = j; // gpu i sends to j
-        m_stageA[j][inA[j]++].in = i;  // gpu j receives from i
-
-        m_stageB[j][outB[j]++].out = t; // finally we want to send data to target
-        m_stageB[t][inB[t]++].in = j;   // target receives this piece from j
+        auto z = outA[i]++;
+        m_stageA[i][z].out = j; // node i sends z-th piece to node j
+        m_stageA[j][z].in = i;  // node j receives z-th piece from node i
+        // node j now contains z-th piece from i to be forwarded to node t
+        m_stageB[j][z-1].out = t; // finally we want to send data to target
+        m_stageB[t][z-1].in = j;   // target receives this piece from j
+        inA[j]++;
       }
     }
     for(uint32_t i = 0; i < m_nGpus; i++) { 
       VLOG("GPU " << i << ": stageA: " << m_stageA.printRow(i));
       VLOG("GPU " << i << ": stageB: " << m_stageB.printRow(i));
     }
-    outputDot(0);
+    for(const auto& a : m_stageA) {
+      if(a.in == s_bogus || a.out == s_bogus) {
+        ThrowError<>("Unitialized node for stageA!");
+      }
+    }
+    for(const auto& b : m_stageB) {
+      if(b.in == s_bogus || b.out == s_bogus) {
+        ThrowError<>("Unitialized node for stageB!");
+      }
+    }
+    outputDot();
   }
 
   void init() 
@@ -308,7 +333,7 @@ public:
     for(uint32_t j = 0, num = 0; j < m_curElems; j++) {
       auto truth = getElement(recvPeer(id), j);
       if(dst[j] != truth) {
-        //ThrowError< 256 >("%d: verify failed truth: %f gpu: %f", j, truth, dst[j]);
+        //ThrowError<>("%d: verify failed truth: %f gpu: %f", j, truth, dst[j]);
         PRINTZ("%X: verify failed truth: %f gpu: %f", j, truth, dst[j]);
         if(num++ >= 5)
           break;
@@ -382,7 +407,7 @@ public:
     m_measureTime = measureTime;
     m_curElems = numElems;
     if(m_curElems > m_maxElems) {
-       ThrowError< 256 >("numElems must be <= m_maxElems");
+       ThrowError< >("numElems must be <= m_maxElems");
     }
 
     m_offsets.resize(s_nExtraPeers + 1);
