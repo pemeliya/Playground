@@ -5,11 +5,13 @@
 #include <stdexcept>
 #include <iomanip>
 #include <iostream>
+#include <fstream>
 #include <numeric>
 #include <random>
 #include <thread>
 #include "common/threading.hpp"
 #include "common/example_utils.hpp"
+#include "common/roc_profiler.h"
 
 #define USE_MEMCPY_PEER 1
 #define VERIFY_DATA 1
@@ -19,6 +21,43 @@
     PRINTZ("Test NCCL failure %s:%d '%s'",              \
         __FILE__,__LINE__,ncclGetErrorString(res));     \
   }
+
+template < class T >
+struct Matrix : std::vector< T > {
+
+  using Base = std::vector< T >;
+
+  Matrix(uint32_t nrows, uint32_t ncols, const T& val = {}) 
+            : Base(ncols*nrows, val),
+        m_nrows(nrows), m_ncols(ncols) {
+  }
+  // access the ith row
+  T *operator[](uint32_t i) { 
+    return Base::data() + i*m_ncols;
+  }
+  const T *operator[](uint32_t i) const {
+    return Base::data() + i*m_ncols;
+  }
+  auto numRows() const {
+    return m_nrows;
+  }
+  auto numCols() const {
+    return m_ncols;
+  }
+
+  std::string printRow(uint32_t row) const {
+    auto prow = (*this)[row];
+    std::ostringstream oss;
+    oss << '{';
+    for(uint32_t i = 0; i < m_ncols; i++) {
+      oss << prow[i] << (i < m_ncols-1 ? ", " : "}");
+    }
+    return oss.str();
+  }
+
+private:
+  uint32_t m_nrows, m_ncols;
+};
 
 template < class T >
 class GpuComm {
@@ -32,6 +71,9 @@ class GpuComm {
 #endif
     double elapsedMs;     // time elapsed per thread
   };
+  struct Node {
+    uint32_t in, out; // this Node sends to Node[out] and receives from Node[in]
+  };
 
   ncclUniqueId m_ncclId;
   size_t m_nGpus, m_maxElems, m_curElems; // total and current data transfer size
@@ -41,20 +83,21 @@ class GpuComm {
   std::mutex m_verifyMtx;
   Barrier m_barrier;
   ThreadPool m_pool;
+  Matrix<Node> m_stageA, m_stageB; // "topology graphs" for stage1 all-to-all and stage 2
 
-  uint32_t m_numExtraPeers = 1; // if zero, all traffic is sent directly
-  double m_splitFactor = 0.5; // this much of traffic is sent to target GPUs directly
+  constexpr static uint32_t s_nExtraPeers = 1; // if zero, all traffic is sent directly
+  constexpr static double s_splitFactor = 0.2; // this much of traffic is sent to target GPUs directly
 
   std::vector< size_t > m_offsets, m_sizes;
 
 public:
   GpuComm(size_t nGpus, size_t maxElems) : m_nGpus(nGpus), m_maxElems(maxElems),
-      m_curElems(maxElems), m_infos(nGpus), m_barrier(nGpus), m_pool(nGpus)
+      m_curElems(maxElems), m_infos(nGpus), m_barrier(nGpus), m_pool(nGpus),
+      m_stageA(nGpus, s_nExtraPeers+1, Node{0xFF,0xFF}), 
+      m_stageB(nGpus, s_nExtraPeers, Node{0xFF,0xFF})
   { 
-    if(m_numExtraPeers == 0) {
-      m_splitFactor = 1.0; 
-    } else if(m_numExtraPeers >= m_nGpus-1) {
-      throw std::runtime_error("Too many extra peers!");
+    if((s_nExtraPeers == 0 && s_splitFactor != 1.0) || s_nExtraPeers >= m_nGpus-1) {
+      throw std::runtime_error("Wrong number of extra peers!");
     }
   }
 
@@ -96,11 +139,118 @@ public:
     return (i - 1 + m_nGpus)%m_nGpus;
   }
 
+  friend std::ostream& operator<<(std::ostream& ofs, const Node& n) {
+    return ofs << '(' << n.in << ',' << n.out << ')';
+  }
+
+  void outputDot(int which) {
+    static const char *colors[] = {
+    "aquamarine", "cornflowerblue", "chocolate1", "darkgreen",
+    "darkorchid", "deeppink", "fuchsia", "goldenrod2"};
+    uint32_t ncolors = sizeof(colors)/sizeof(colors[0]);
+
+    std::string fname = which == 0 ? "stage1.dot" : "stage2.dot";
+    auto& m = m_stageA;
+    std::ofstream ofs(fname);
+    // neato stage1.dot -Tpng > stage1.png 
+    ofs << "digraph G {\n";
+
+    float R = 5, x0 = 10, y0 = 10, da = M_PI*2.0f/m.numRows();
+    for(uint32_t i = 0; i < m.numRows(); i++) {
+      float xf = x0 + R*std::cos(da*i + M_PI/2),
+            yf = y0 + R*std::sin(da*i + M_PI/2);
+      ofs << i << " [pos=\"" << xf << ',' << yf << "!\"];\n";
+    }
+    for(uint32_t i = 0; i < m.numRows(); i++) {
+      for(uint32_t j = 0; j < m.numCols(); j++) {
+        ofs << i << " -> " << m[i][j].out;
+        ofs << " [color=" << colors[i % ncolors];
+        if(j == 0) {
+          ofs << ",penwidth=3.0];\n";
+        } else
+          ofs << ",penwidth=1.5];\n";
+      }
+    }
+
+    auto& m2 = m_stageB;
+    for(uint32_t i = 0; i < m2.numRows(); i++) {
+      for(uint32_t j = 0; j < m2.numCols(); j++) {
+        // how the data comes to node i at position j ??
+        auto t = m[i][j].in;
+        ofs << i << " -> " << m2[i][j].out;
+        ofs << " [color=" << colors[t % ncolors] <<
+        ",style=\"dashed\",penwidth=1.5];\n";
+      }
+    }
+    ofs << '}';
+  }
+
+  void initExtraPeers() {
+
+    // matrix1: stage1 send to j, recv from k
+    // matrix2: stage2 same ..
+
+    std::vector< uint32_t > permute(m_nGpus);
+    for(uint32_t i = 0; i < m_nGpus; i++) {
+      // GPU[i]:     0, 1, 2, 3, 4, 5, 6, 7
+      // permute[i]: 1, 2, 3, 4, 5, 6, 7, 0
+      permute[i] = (i + 1) % m_nGpus; // defines to which node GPU[i] should send its data
+    }
+    for(uint32_t i = 0; i < m_nGpus; i++) {
+      m_stageA[i][0].out = permute[i];  // gpu i sends to gpu permute[i]
+      m_stageA[permute[i]][0].in = i;   // gpu permute[i] receives from gpu i
+    }
+
+    // the # of incoming links and outgoing links (the target link is already counted)
+    std::vector< uint32_t > inA(m_nGpus, 1), outA(m_nGpus, 1),
+                            inB(m_nGpus, 0), outB(m_nGpus, 0);
+    for(uint32_t i = 0; i < m_nGpus; i++) {
+
+      auto t = m_stageA[i][0].out; // target node for GPU i
+      // iterate until all outgoing links for GPU i are filled
+      for(uint32_t jc = i + 1; jc <= i + m_nGpus && outA[i] <= s_nExtraPeers; jc++) {
+        uint32_t dj = jc - m_nGpus, j = (int)dj < 0 ? jc : dj;
+        // skip self, the target node, and nodes with too many extra peers
+        if(i == j || t == j || inA[j] > s_nExtraPeers) { 
+          continue;
+        }
+        // VLOG(i << "," << j << " in/out: " << incoming[j] << ", " << outgoing[i]);
+        // std::ostringstream oss;
+        // oss << '[';
+        // for(auto o : outgoing) {
+        //   oss << o << ",";
+        // }
+        // oss << ']';
+        // VLOG("outgoing: " << oss.str());
+        // oss.str("");
+        // oss << '[';
+        // for(auto o : incoming) {
+        //   oss << o << ",";
+        // }
+        // oss << ']';
+        // VLOG("incoming: " << oss.str());
+        m_stageA[i][outA[i]++].out = j; // gpu i sends to j
+        m_stageA[j][inA[j]++].in = i;  // gpu j receives from i
+
+        m_stageB[j][outB[j]++].out = t; // finally we want to send data to target
+        m_stageB[t][inB[t]++].in = j;   // target receives this piece from j
+      }
+    }
+    for(uint32_t i = 0; i < m_nGpus; i++) { 
+      VLOG("GPU " << i << ": stageA: " << m_stageA.printRow(i));
+      VLOG("GPU " << i << ": stageB: " << m_stageB.printRow(i));
+    }
+    outputDot(0);
+  }
+
   void init() 
   {
 #if !USE_MEMCPY_PEER
     NCCLCHECK(ncclGetUniqueId(&m_ncclId));
 #endif
+    initExtraPeers();
+    throw "oops";
+
     m_pool.runJob([this](int id) {
       auto& info = m_infos[id];
       size_t nBytes = m_maxElems*sizeof(T);
@@ -174,13 +324,13 @@ public:
     // CHK(cudaMemcpyPeerAsync(m_recvBufs[peer],
     //     peer, m_sendBufs[id], id, m_curElems*sizeof(T), m_streams[id]));
     if(step == 0) {
-      for(int i = 0; i <= m_numExtraPeers; i++) {
+      for(int i = 0; i <= s_nExtraPeers; i++) {
         int peer = (id + i + 1) % m_nGpus;
         CHK(cudaMemcpyPeerAsync(m_infos[peer].recvBuf + m_offsets[i],
            peer, info.sendBuf + m_offsets[i], id, m_sizes[i]*sizeof(T), info.stream));
       }
     } else {
-      for(int i = 1; i <= m_numExtraPeers; i++) {
+      for(int i = 1; i <= s_nExtraPeers; i++) {
 
          CHK(cudaMemcpyAsync(info.sendBuf + m_offsets[i], info.recvBuf + m_offsets[i],
             m_sizes[i]*sizeof(T), cudaMemcpyDeviceToDevice, info.stream));
@@ -198,7 +348,7 @@ public:
     ncclCommUserRank(info.comm, &rank);
     NCCLCHECK(ncclGroupStart());
     if(step == 0) {
-      for(int i = 0; i <= m_numExtraPeers; i++) {
+      for(int i = 0; i <= s_nExtraPeers; i++) {
         int sendP = (rank + i + 1) % m_nGpus,
             recvP = (rank - 1 - i + m_nGpus) % m_nGpus;
         NCCLCHECK(ncclSend(info.sendBuf + m_offsets[i], 
@@ -210,7 +360,7 @@ public:
     } else {
       // std::lock_guard _(m_verifyMtx);
       // NOTE: you screw up send buffer here => hence verify iter must be the 1st one !!!
-      for(int i = 1; i <= m_numExtraPeers; i++) {
+      for(int i = 1; i <= s_nExtraPeers; i++) {
         CHK(cudaMemcpyAsync(info.sendBuf + m_offsets[i], info.recvBuf + m_offsets[i],
             m_sizes[i]*sizeof(T), cudaMemcpyDeviceToDevice, info.stream));
 
@@ -235,19 +385,19 @@ public:
        ThrowError< 256 >("numElems must be <= m_maxElems");
     }
 
-    m_offsets.resize(m_numExtraPeers + 1);
-    m_sizes.resize(m_numExtraPeers + 1);
+    m_offsets.resize(s_nExtraPeers + 1);
+    m_sizes.resize(s_nExtraPeers + 1);
     m_offsets[0] = 0;
-    m_sizes[0] = ((size_t)(m_curElems * m_splitFactor) + 3) & ~3;
-    // remaining is to be split evenly between m_numExtraPeers
+    m_sizes[0] = ((size_t)(m_curElems * s_splitFactor) + 3) & ~3;
+    // remaining is to be split evenly between s_nExtraPeers
     size_t remaining = m_curElems - m_sizes[0], ofs = m_sizes[0],
-        step = m_numExtraPeers > 0 ? (remaining / m_numExtraPeers + 3) & ~3 : 0;
-    for(uint32_t i = 1; i <= m_numExtraPeers; i++, ofs += step) {
+        step = s_nExtraPeers > 0 ? (remaining / s_nExtraPeers + 3) & ~3 : 0;
+    for(uint32_t i = 1; i <= s_nExtraPeers; i++, ofs += step) {
       m_offsets[i] = ofs;
       m_sizes[i] = step;
     }
-    m_sizes[m_numExtraPeers] = m_curElems - m_offsets[m_numExtraPeers];
-    for(uint32_t i = 0; i <= m_numExtraPeers; i++) {
+    m_sizes[s_nExtraPeers] = m_curElems - m_offsets[s_nExtraPeers];
+    for(uint32_t i = 0; i <= s_nExtraPeers; i++) {
       PRINTZ("%d: ofs: %lX; size: %lX; sum: %lX", 
             i, m_offsets[i], m_sizes[i], m_offsets[i] + m_sizes[i]);
     }
@@ -267,7 +417,7 @@ public:
       run_single_gpu(id, 0);
       CHK(cudaStreamSynchronize(info.stream));
       
-      m_barrier.wait(); // wait all threads to arrive here before starting timing
+      //m_barrier.wait(); // wait all threads to arrive here before starting timing
       run_single_gpu(id, 1);
       CHK(cudaStreamSynchronize(info.stream));
     } // for
@@ -294,6 +444,8 @@ public:
   }
 }; // struct GpuComm
 
+__global__ void kernelD() { printf("\nKernel D\n"); }
+
 template < class T >
 void runRCCLTest(size_t elemsMin, size_t elemsMax)
 {
@@ -311,11 +463,30 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
   GpuComm<T> obj(m_nGpus, elemsMax);
   obj.init();
 #if VERIFY_DATA
-   obj.run(elemsMin, 1, false, true); // last run to verify data
+   obj.run(elemsMin, 1, false, true); // first run to verify data
 #endif
 
   obj.run(elemsMax, (nwarmups+1)/2);
-  // obj.run(elemsMin, nwarmups/2);
+  obj.run(elemsMin, nwarmups/2);
+
+  {
+    void *gpuMem;
+    std::vector< uint8_t > zz(16);
+  RocProfilerSession sess;
+  sess.start();
+//    obj.run(elemsMin, 1);
+//  cudaSetDevice(0);
+//   hipLaunchKernelGGL(kernelD, dim3(1), dim3(1), 0, 0);
+
+ // cudaSetDevice(0);
+  // hipDeviceProp_t devProp;
+  // hipGetDeviceProperties(&devProp, 0);
+  // hipMalloc((void**)&gpuMem, zz.size());
+  // hipMemcpy(gpuMem, zz.data(), zz.size(), cudaMemcpyHostToDevice);
+  sess.stop();
+
+  (void)hipFree(gpuMem);
+  }
 
   for(size_t sz = elemsMin; sz <= elemsMax; ) {
     obj.run(sz, niters, true);
@@ -342,4 +513,7 @@ int main() try
 }
 catch(std::exception& ex) {
   VLOG("Exception: " << ex.what());
+}
+catch(...) {
+  VLOG("Unknown exception");
 }
