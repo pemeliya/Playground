@@ -13,7 +13,7 @@
 #include "common/example_utils.hpp"
 #include "common/roc_profiler.h"
 
-#define USE_MEMCPY_PEER 1
+#define USE_MEMCPY_PEER 0
 #define VERIFY_DATA 1
 
 #define CHKNCCL(cmd) \
@@ -64,7 +64,7 @@ class GpuComm {
 
   struct ThreadInfo {
     int gpuId;            // gpu ID assigned to this thread
-    cudaStream_t stream;  // associated stream
+    std::vector< cudaStream_t > streams; // associated streams
     T *sendBuf, *recvBuf; // send and receive buffers
 #if !USE_MEMCPY_PEER
     ncclComm_t comm;      // NCCL handle
@@ -85,8 +85,8 @@ class GpuComm {
   ThreadPool m_pool;
   Matrix<Node> m_stageA, m_stageB; // "topology graphs" for stage1 all-to-all and stage 2
 
-  constexpr static uint32_t s_nExtraPeers = 3; // if zero, all traffic is sent directly
-  constexpr static double s_splitFactor = 0.2; // this much of traffic is sent to target GPUs directly
+  constexpr static uint32_t s_nExtraPeers = 2; // if zero, all traffic is sent directly
+  constexpr static double s_splitFactor = 0.5; // this much of traffic is sent to target GPUs directly
   constexpr static uint32_t s_bogus = 0xFFFFFFFFu; // to catch uninitialized entries
 
   std::vector< size_t > m_offsets, m_sizes;
@@ -105,7 +105,9 @@ public:
   ~GpuComm() {
     for(auto& info : m_infos) {
       (void)cudaSetDevice(info.gpuId);
-      (void)cudaStreamDestroy(info.stream);
+      for(auto& s : info.streams) {
+        (void)cudaStreamDestroy(s);
+      }
       (void)cudaFree(info.sendBuf);
 #if !USE_MEMCPY_PEER
       (void)ncclCommDestroy(info.comm);
@@ -281,12 +283,11 @@ public:
       CHK(hipExtMallocWithFlags((void **)&info.sendBuf, nBytes*2, flags));
       info.recvBuf = info.sendBuf + m_maxElems;
 
-      CHK(cudaStreamCreateWithFlags(&info.stream, cudaStreamNonBlocking));
-	//       if (cumask[0] || cumask[1] || cumask[2] || cumask[3]) {
-	//          PRINT("cumask: ");
-	//          for (int i = 0; i < 4 ; i++) PRINT("%x,", cumask[i]);
-	//          PRINT("\n");
-	//          HIPCHECK(hipExtStreamCreateWithCUMask(m_streams+i, 4, cumask));
+      info.streams.resize(s_nExtraPeers + 1);
+      for(auto& s : info.streams) {
+        CHK(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking));
+      }
+
       CHK(cudaMemset(info.recvBuf, 0, nBytes));
       std::vector< T > refBuf(m_maxElems);
 #if VERIFY_DATA
@@ -297,7 +298,7 @@ public:
       std::fill(refBuf.begin(), refBuf.end(), T(id));
 #endif
       CHK(cudaMemcpyAsync(info.sendBuf, refBuf.data(), nBytes, cudaMemcpyHostToDevice,
-            info.stream));
+            info.streams[0]));
 #if USE_MEMCPY_PEER
       for(uint32_t i = 0; i < m_nGpus; i++) {
         if(i == id) continue;
@@ -345,17 +346,17 @@ public:
       for(int i = 0; i <= s_nExtraPeers; i++) {
         int sendP = V[i].out;
         CHK(cudaMemcpyPeerAsync(m_infos[sendP].recvBuf + m_offsets[i],
-           sendP, info.sendBuf + m_offsets[i], id, m_sizes[i]*sizeof(T), info.stream));
+           sendP, info.sendBuf + m_offsets[i], id, m_sizes[i]*sizeof(T), info.streams[i]));
       }
     } else {
       for(int i = 1; i <= s_nExtraPeers; i++) {
 
          CHK(cudaMemcpyAsync(info.sendBuf + m_offsets[i], info.recvBuf + m_offsets[i],
-            m_sizes[i]*sizeof(T), cudaMemcpyDeviceToDevice, info.stream));
+            m_sizes[i]*sizeof(T), cudaMemcpyDeviceToDevice, info.streams[i]));
 
         int sendP = V[i-1].out;
         CHK(cudaMemcpyPeerAsync(m_infos[sendP].recvBuf + m_offsets[i],
-           sendP, info.sendBuf + m_offsets[i], id, m_sizes[i]*sizeof(T), info.stream));
+           sendP, info.sendBuf + m_offsets[i], id, m_sizes[i]*sizeof(T), info.streams[i]));
       }
     }
 #else // USE_MEMCPY_PEER
@@ -369,22 +370,22 @@ public:
       for(int i = 0; i <= s_nExtraPeers; i++) {
         int sendP = V[i].out, recvP = V[i].in;
         CHKNCCL(ncclSend(info.sendBuf + m_offsets[i], 
-              m_sizes[i], type, sendP, info.comm, info.stream));
+              m_sizes[i], type, sendP, info.comm, info.streams[0]));
         CHKNCCL(ncclRecv(info.recvBuf + m_offsets[i], 
-              m_sizes[i], type, recvP, info.comm, info.stream));
+              m_sizes[i], type, recvP, info.comm, info.streams[0]));
       }
     } else {
       // std::lock_guard _(m_verifyMtx);
       // NOTE: you screw up send buffer here => hence verify iter must be the 1st one !!!
       for(int i = 1; i <= s_nExtraPeers; i++) {
         CHK(cudaMemcpyAsync(info.sendBuf + m_offsets[i], info.recvBuf + m_offsets[i],
-            m_sizes[i]*sizeof(T), cudaMemcpyDeviceToDevice, info.stream));
+            m_sizes[i]*sizeof(T), cudaMemcpyDeviceToDevice, info.streams[0]));
 
         int sendP = V[i-1].out, recvP = V[i-1].in;
         CHKNCCL(ncclSend(info.sendBuf + m_offsets[i], 
-               m_sizes[i], type, sendP, info.comm, info.stream));
+               m_sizes[i], type, sendP, info.comm, info.streams[0]));
         CHKNCCL(ncclRecv(info.recvBuf + m_offsets[i], 
-               m_sizes[i], type, recvP, info.comm, info.stream));
+               m_sizes[i], type, recvP, info.comm, info.streams[0]));
       }
     }
     CHKNCCL(ncclGroupEnd());
@@ -429,13 +430,16 @@ public:
     CPU_BEGIN_TIMING(T);
     for(int i = 0; i < numIters; i++) {
       run_single_gpu(id, 0);
-      CHK(cudaStreamSynchronize(info.stream));
+      for(auto& s : info.streams) {
+        CHK(cudaStreamSynchronize(s));
+      }
 #if USE_MEMCPY_PEER
-      // so far this is needed
-      m_barrier.wait(); // wait all threads to arrive here before starting timing
+      //m_barrier.wait(); // wait all threads to arrive here before starting timing
 #endif
       run_single_gpu(id, 1);
-      CHK(cudaStreamSynchronize(info.stream));
+      for(auto& s : info.streams) {
+        CHK(cudaStreamSynchronize(s));
+      }
     } // for
 
     auto tnow = std::chrono::high_resolution_clock::now();
@@ -526,7 +530,7 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
 int main() try 
 {
   DeviceInit(0);
-  size_t sMin = 4*1024*1024, sMax = 64*1024*1024;
+  size_t sMin = 9289728/4, sMax = 9289728*8;
   runRCCLTest<float>(sMin, sMax);
 }
 catch(std::exception& ex) {
