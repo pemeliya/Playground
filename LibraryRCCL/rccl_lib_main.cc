@@ -28,6 +28,9 @@
 #define LOAD(addr) __builtin_nontemporal_load(addr)
 #define STORE(x, addr) __builtin_nontemporal_store((x), (addr))
 
+#define ATOMIC_LOAD(VAR)       __atomic_load_n((VAR),         __ATOMIC_ACQUIRE)
+#define ATOMIC_STORE(DST, SRC) __atomic_store_n((DST), (SRC), __ATOMIC_RELEASE)
+
 struct P2PWorkItem {
   uint32_t peer;      // send/recv peer
   uint32_t size;      // buffer size in bytes (limited by 4GB!)
@@ -250,34 +253,32 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
   uint64_t regs[NumRegs];
 
   // each thread loads 8 or 16 bytes of data ??
-  for(uint32_t ofs = 0; ofs < n64words; ofs += BlockSz*NumRegs) {
+  for(uint32_t ofs = tid*2; ofs < n64words; ) {
     if(tid == 0) {
       gprint("running ofs: %d n64words: %d", ofs, n64words);
     }
+    auto src_ofs = ofs;
 #pragma unroll
     // we can load BlockSz * NumRegs in one step here
     for(uint32_t i = 0; i < NumRegs/2; i++) {
-      //if(tid*2 < n64words - 2) 
-      {
-        regs[2*i] = LOAD(srcBuf + tid*2);
-        regs[2*i + 1] = LOAD(srcBuf + tid*2 + 1);
-      }
-      // loaded two 64-bit words per thread in one go
-      srcBuf += BlockSz*2;
+      if(src_ofs < n64words)
+        regs[2*i] = LOAD(srcBuf + src_ofs);
+      if(src_ofs + 1< n64words)
+        regs[2*i + 1] = LOAD(srcBuf + src_ofs + 1);
+      src_ofs += BlockSz*2;
     }
 #pragma unroll
     for(uint32_t i = 0; i < NumRegs/2; i++) {
-      //if(tid*2 < n64words - 2) 
-      {
-        STORE(regs[2*i], targetBuf + tid*2);
-        STORE(regs[2*i + 1], targetBuf + tid*2 + 1);
-      }
-      // loaded two 64-bit words per thread in one go
-      targetBuf += BlockSz*2;
+      if(ofs < n64words)
+        STORE(regs[2*i], targetBuf + ofs);
+      if(ofs + 1 < n64words)
+        STORE(regs[2*i + 1], targetBuf + ofs + 1);
+      ofs += BlockSz*2;
     }
-    //n64words -= BlockSz*NumRegs;
   } // for ofs
-  __threadfence();
+  __threadfence_system(); // TODO check if it's correct
+
+
   // NOTE: receiver block must spin here until sender is ready in order
   // to finish kernel when data transfer is finished..
 }
@@ -316,35 +317,16 @@ void GpuCommLib::runSendRecv(uint32_t ID, uint32_t recvPeer, void *recvBuf,
   //          sendP, info.sendBuf + m_offsets[i], id, m_sizes[i]*sizeof(T), info.streams[i]));
 }
 
-// each thread for one GPU executes ncclRecv and ncclSend which creates
-// one kernel with one channel (with correct buffer exchange pointer)
-// that is ncclRecv (exchange buf to be shared between GPUs a and b)
-
-// __global__ void atomicKernel(float *ptr) { 
-
-//   int tid = threadIdx.x, bid = blockIdx.x;
-//   auto val = atomicAdd(ptr, 1.0f);
-//   if(val >= 512*512-10) {
-//     printf("bid: %d, tid: %d, val: %f\n", bid, tid, val);
-//   }
-// }
-
 template < class T >
 void runRCCLTest()
 {
-  int nGpus = 0, elems = 8192;
+  int nGpus = 0, elems = 1002;
   CHK(cudaGetDeviceCount(&nGpus));
   VLOG("Num devices: " << nGpus);
   nGpus = 2;
   GpuCommLib commLib(nGpus);
   ThreadPool pool(nGpus);
   Barrier barrier(nGpus);
-
-  // float *devPtr;
-  // (void)hipMalloc((void**)&devPtr, 16);
-  // (void)hipMemset(devPtr, 0, 16);
-  // atomicKernel<<<512, 512, 0>>>(devPtr);
-  // (void)hipFree(devPtr);
 
   std::vector< SendRecvItem<T> > items(nGpus);
   std::mutex mtx;
