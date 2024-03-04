@@ -22,10 +22,14 @@
 // NOTE: if data size is small, maybe makes sense to use just normal load/store?
 #if 0
 #define LOAD(addr) __builtin_nontemporal_load(addr)
+#else
+#define LOAD(addr) (addr)[0]
+#endif
+// it seems that loading with cache and storing without it gives the best results
+#if 1
 #define STORE(x, addr) __builtin_nontemporal_store((x), (addr))
 #else
-#define LOAD(addr) (*(addr))
-#define STORE(x, addr) *(addr) = (x)
+#define STORE(x, addr) (addr)[0] = (x)
 #endif
 
 #define ATOMIC_LOAD(VAR)       __atomic_load_n((VAR),         __ATOMIC_ACQUIRE)
@@ -268,7 +272,7 @@ __shared__ WorkInfo s_workInfo;
 
 
 // ltid is a local tid within group !!!
-__device__ void doReceive(uint32_t ltid) {
+__forceinline__ __device__ void setupRecvPtrs(uint32_t ltid) {
 
   // we provide the sender our receive buffer
   if(ltid == 0) {
@@ -288,7 +292,7 @@ __device__ void doReceive(uint32_t ltid) {
   }
 }
 
-__device__ void doSend(uint32_t ltid) {
+__forceinline__  __device__ void setupSendPtrs(uint32_t ltid) {
 
   auto& item = s_workInfo.sendItem;
   if(ltid == 0) {
@@ -323,10 +327,10 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
 
   // we will use directWrite: that is, each sender writes data to receiver buffer directly
   // for that, receiver should provide sender the buffer address
-  if(tid < BlockSz/2) {
-    doReceive(tid);
-  } else {
-    doSend(tid - BlockSz/2);
+  if(tid < warpSize) {
+    setupRecvPtrs(tid);
+  } else if(tid < warpSize*2) {
+    setupSendPtrs(tid - warpSize);
   }
 
   __syncthreads();
