@@ -12,6 +12,7 @@ set(COMPILE_FOR_ROCM 1)
 set(CMAKE_VERBOSE_MAKEFILE ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_EXTENSIONS ON)
+set(QCCL_LIB "${PROJECT_SOURCE_DIR}/../LibraryQCCL")
 
 file(GLOB INC *.h *.hpp ../common/*.h ../common/*.hpp)
 file(GLOB SRC *.cpp *.cc ../common/roc_profiler.cpp)
@@ -57,7 +58,7 @@ endif()
 # endforeach()
 
 #set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=gnu++20")
-include_directories("..")
+include_directories(".." ${QCCL_LIB})
 
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -65,7 +66,9 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 add_definitions(-D_USE_MATH_DEFINES -DCOMPILE_FOR_ROCM=${COMPILE_FOR_ROCM})
 
+add_subdirectory(${QCCL_LIB} ${CMAKE_BINARY_DIR}/bin)
 add_executable(${PROJECT_NAME} ${SRC} ${INC})
+target_link_libraries(${PROJECT_NAME} QCCL)
 
 set(TARGET_BIN "$<TARGET_FILE_NAME:${PROJECT_NAME}>")
 

@@ -13,13 +13,15 @@
 #include "common/example_utils.hpp"
 #include "common/roc_profiler.h"
 
-#define USE_MEMCPY_PEER 0
+#include "qccl_lib.h"
+
+#define USE_CUSTOM_QCCL 1
 #define VERIFY_DATA 1
 
 #define CHKNCCL(cmd) \
   if(auto res = (cmd); res != ncclSuccess) {           \
     PRINTZ("Test NCCL failure %s:%d '%s'",              \
-        __FILE__,__LINE__,ncclGetErrorString(res));     \
+        __FILE__,__LINE__, ncclGetErrorString(res));     \
   }
 
 template < class T >
@@ -50,8 +52,10 @@ struct Matrix : std::vector< T > {
     std::ostringstream oss;
     oss << '{';
     for(uint32_t i = 0; i < m_ncols; i++) {
-      oss << prow[i] << (i < m_ncols-1 ? ", " : "}");
+      oss << prow[i];
+      if(i < m_ncols-1) oss << ',';
     }
+    oss << '}';
     return oss.str();
   }
 
@@ -66,7 +70,7 @@ class GpuComm {
     int gpuId;            // gpu ID assigned to this thread
     std::vector< cudaStream_t > streams; // associated streams
     T *sendBuf, *recvBuf; // send and receive buffers
-#if !USE_MEMCPY_PEER
+#if !USE_CUSTOM_QCCL
     ncclComm_t comm;      // NCCL handle
 #endif
     double elapsedMs;     // time elapsed per thread
@@ -85,8 +89,8 @@ class GpuComm {
   ThreadPool m_pool;
   Matrix<Node> m_stageA, m_stageB; // "topology graphs" for stage1 all-to-all and stage 2
 
-  constexpr static uint32_t s_nExtraPeers = 2; // if zero, all traffic is sent directly
-  constexpr static double s_splitFactor = 0.5; // this much of traffic is sent to target GPUs directly
+  constexpr static uint32_t s_nExtraPeers = 0; // if zero, all traffic is sent directly
+  constexpr static double s_splitFactor = 1.0; // this much of traffic is sent to target GPUs directly
   constexpr static uint32_t s_bogus = 0xFFFFFFFFu; // to catch uninitialized entries
 
   std::vector< size_t > m_offsets, m_sizes;
@@ -109,7 +113,7 @@ public:
         (void)cudaStreamDestroy(s);
       }
       (void)cudaFree(info.sendBuf);
-#if !USE_MEMCPY_PEER
+#if !USE_CUSTOM_QCCL
       (void)ncclCommDestroy(info.comm);
 #endif
     }
@@ -258,12 +262,14 @@ public:
 
   T getElement(int device, size_t idx) {
     //return static_cast<T>(100.0f*std::sin((float)idx*2*M_PI/(device+2)));
-    return static_cast<T>(device);
+    return static_cast<T>(device - 11111);
   }
 
   void init() 
   {
-#if !USE_MEMCPY_PEER
+#if USE_CUSTOM_QCCL
+    CHKQCCL(qcclInit(m_nGpus));
+#else
     CHKNCCL(ncclGetUniqueId(&m_ncclId));
 #endif
 
@@ -299,16 +305,7 @@ public:
 #endif
       CHK(cudaMemcpyAsync(info.sendBuf, refBuf.data(), nBytes, cudaMemcpyHostToDevice,
             info.streams[0]));
-#if USE_MEMCPY_PEER
-      for(uint32_t i = 0; i < m_nGpus; i++) {
-        if(i == id) continue;
-        int enable;
-        CHK(cudaDeviceCanAccessPeer(&enable, id, i));
-        if(enable == 0) {
-          CHK(cudaDeviceEnablePeerAccess(i, 0));
-        }
-      }
-#else
+#if !USE_CUSTOM_QCCL
       CHKNCCL(ncclCommInitRank(&info.comm, m_nGpus, m_ncclId, id));
 #endif
     }); // runJob
@@ -341,25 +338,17 @@ public:
   {
     auto& info = m_infos[id];
     const auto& V = stage == 0 ? m_stageA[id] : m_stageB[id];
-#if USE_MEMCPY_PEER
-    if(stage == 0) {
-      for(int i = 0; i <= s_nExtraPeers; i++) {
-        int sendP = V[i].out;
-        CHK(cudaMemcpyPeerAsync(m_infos[sendP].recvBuf + m_offsets[i],
-           sendP, info.sendBuf + m_offsets[i], id, m_sizes[i]*sizeof(T), info.streams[i]));
-      }
-    } else {
-      for(int i = 1; i <= s_nExtraPeers; i++) {
-
-         CHK(cudaMemcpyAsync(info.sendBuf + m_offsets[i], info.recvBuf + m_offsets[i],
-            m_sizes[i]*sizeof(T), cudaMemcpyDeviceToDevice, info.streams[i]));
-
-        int sendP = V[i-1].out;
-        CHK(cudaMemcpyPeerAsync(m_infos[sendP].recvBuf + m_offsets[i],
-           sendP, info.sendBuf + m_offsets[i], id, m_sizes[i]*sizeof(T), info.streams[i]));
-      }
+#if USE_CUSTOM_QCCL
+    for(int i = 0; i <= s_nExtraPeers; i++) {
+        int sendP = V[i].out, recvP = V[i].in;
+        auto size = m_sizes[i] * sizeof(T);
+        CHKQCCL(qcclSendRecv(id, recvP, info.recvBuf, size,
+            sendP, info.sendBuf, size));
     }
-#else // USE_MEMCPY_PEER
+    CHKQCCL(qcclRun(id, info.streams[0]));
+    VLOG("------------!");
+
+#else // USE_CUSTOM_QCCL
     auto type = getNcclType();
     int rank;
     // CHKNCCL(ncclCommCount(m_comms[i], &nRanks));
@@ -389,7 +378,7 @@ public:
       }
     }
     CHKNCCL(ncclGroupEnd());
-#endif // USE_MEMCPY_PEER
+#endif // USE_CUSTOM_QCCL
   }
 
   void run(size_t numElems, int numIters, bool measureTime = false, bool verifyData = false) {
@@ -433,13 +422,13 @@ public:
       for(auto& s : info.streams) {
         CHK(cudaStreamSynchronize(s));
       }
-#if USE_MEMCPY_PEER
+#if !USE_CUSTOM_QCCL
       //m_barrier.wait(); // wait all threads to arrive here before starting timing
-#endif
       run_single_gpu(id, 1);
       for(auto& s : info.streams) {
         CHK(cudaStreamSynchronize(s));
       }
+#endif      
     } // for
 
     auto tnow = std::chrono::high_resolution_clock::now();
@@ -464,28 +453,27 @@ public:
   }
 }; // struct GpuComm
 
-__global__ void kernelD() { printf("\nKernel D\n"); }
-
 template < class T >
 void runRCCLTest(size_t elemsMin, size_t elemsMax)
 {
-  int m_nGpus = 0, nwarmups = 5, niters = 10;
-  CHK(hipGetDeviceCount(&m_nGpus));
-  // m_nGpus = 4;
-  VLOG("Num devices: " << m_nGpus << "; max data size: " << (double)(elemsMax*sizeof(T))/(1024*1024) << 
+  int nGpus = 0, nwarmups = 5, niters = 10;
+  CHK(hipGetDeviceCount(&nGpus));
+  nGpus = 2;
+  VLOG("Num devices: " << nGpus << "; max data size: " << (double)(elemsMax*sizeof(T))/(1024*1024) << 
         " Mb; neighbour exchange with "
-#if USE_MEMCPY_PEER
-      "hipMemcpyPeerAsync"
+#if USE_CUSTOM_QCCL
+      "MINI QCCL"
 #else
       "RCCL"
 #endif
       );
 
-  GpuComm<T> obj(m_nGpus, elemsMax);
+  GpuComm<T> obj(nGpus, elemsMax);
   obj.init();
 #if VERIFY_DATA
    obj.run(elemsMin, 1, false, true); // first run to verify data
 #endif
+  return;
 
   obj.run(elemsMax, (nwarmups+1)/2);
   obj.run(elemsMin, nwarmups/2);
@@ -516,14 +504,6 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
       break;
     sz = std::min(sz * 3 / 2, elemsMax);
   }
-  
-//      } else {
-//        CHKNCCL(ncclGroupStart());
-//        for (int ii=0; ii<m_nGpus*nThreads; ii++) {
-//          HIPCHECK(hipSetDevice(m_gpus[ii]));
-// 	 if (!enable_multiranks) {
-// 	   CHKNCCL(ncclCommInitRank(m_comms+ii, ncclProcs*nThreads*m_nGpus, ncclId, proc*nThreads*m_nGpus+ii));
-// 	 }
 }
 // NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,COLL
 
@@ -531,6 +511,7 @@ int main() try
 {
   DeviceInit(0);
   size_t sMin = 9289728/4, sMax = 9289728*8;
+  //size_t sMin = 1024, sMax = 1024;
   runRCCLTest<float>(sMin, sMax);
 }
 catch(std::exception& ex) {
