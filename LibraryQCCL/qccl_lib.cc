@@ -13,12 +13,20 @@
 #include "common/threading.hpp"
 #include "common/example_utils.hpp"
 
+#if 0
 #define gprint(fmt, ...) printf(fmt"\n", ##__VA_ARGS__)
-
+#else
+#define gprint(fmt, ...)
+#endif
 
 // NOTE: if data size is small, maybe makes sense to use just normal load/store?
+#if 0
 #define LOAD(addr) __builtin_nontemporal_load(addr)
 #define STORE(x, addr) __builtin_nontemporal_store((x), (addr))
+#else
+#define LOAD(addr) (*(addr))
+#define STORE(x, addr) *(addr) = (x)
+#endif
 
 #define ATOMIC_LOAD(VAR)       __atomic_load_n((VAR),         __ATOMIC_ACQUIRE)
 #define ATOMIC_STORE(DST, SRC) __atomic_store_n((DST), (SRC), __ATOMIC_RELEASE)
@@ -41,7 +49,7 @@ struct WorkInfo
 static_assert(sizeof(WorkInfo) % sizeof(uint64_t) == 0, 
     "Size must be aligned by 8 bytes");
 
-template < uint32_t BlockSz >
+template < uint32_t BlockSz, uint32_t NumRegs >
 __global__ void rcclKernel(WorkInfo *gworkInfo);
 
 template < class T >
@@ -109,6 +117,8 @@ struct SendRecvItem {
 class GpuCommLib {
 
   static constexpr size_t s_defNumWorkItems = 8;
+  static constexpr size_t s_numWorkThreads = 512;
+  static constexpr size_t s_numRegsPerThread = 32;
 
   struct ThreadInfo {
     int gpuId;             // gpu ID assigned to this thread
@@ -202,14 +212,16 @@ public:
       allocWorkBuf(&info, info.numDevWorkItems * 3 / 2);
     }
     uint32_t nBlocks = info.workItems.size();
-    VLOG("Work Item size: " << sizeof(WorkInfo) << " executing with #blocks:" 
-          << nBlocks);
+    // VLOG("Work Item size: " << sizeof(WorkInfo) << " executing with #blocks:" 
+    //       << nBlocks);
 
     CHK(cudaMemcpyAsync(info.workBuf, info.workItems.data(), 
           sizeof(WorkInfo) * nBlocks, cudaMemcpyHostToDevice, stream));
     
-    constexpr uint32_t BlockSz = 256;
-    rcclKernel<BlockSz><<<nBlocks, BlockSz, 0, stream>>>(info.workBuf);
+    constexpr uint32_t BlockSz = s_numWorkThreads;
+    rcclKernel<BlockSz, s_numRegsPerThread><<<nBlocks, BlockSz, 0, stream>>>
+                                      (info.workBuf);
+    info.workItems.clear();
     return QCCL_Result::OK;
   }
 
@@ -295,13 +307,14 @@ __device__ void doSend(uint32_t ltid) {
 }
 
 // there maybe many work items: one for each gpu block..
-template < uint32_t BlockSz >
+template < uint32_t BlockSz, uint32_t NumRegs >
+__launch_bounds__(BlockSz, 1)
 __global__ void rcclKernel(WorkInfo *gworkInfo) { 
 
   constexpr uint32_t s_num = sizeof(WorkInfo) / sizeof(uint64_t),
             warpSize = 64;
 
-  uint32_t tid = threadIdx.x, groupID = tid / warpSize;
+  uint32_t tid = threadIdx.x;
   if(tid < s_num) {
     auto d = ((uint64_t *)gworkInfo)[tid];
     ((uint64_t *)&s_workInfo)[tid] = d;
@@ -310,42 +323,42 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
 
   // we will use directWrite: that is, each sender writes data to receiver buffer directly
   // for that, receiver should provide sender the buffer address
-  if(groupID < 2) {
+  if(tid < BlockSz/2) {
     doReceive(tid);
   } else {
-    doSend(tid - 2*warpSize);
+    doSend(tid - BlockSz/2);
   }
 
   __syncthreads();
 
-  auto srcBuf = (const uint64_t *)s_workInfo.sendItem.dataBuf;
+  using Word = uint64_t;
+  auto srcBuf = (const Word *)s_workInfo.sendItem.dataBuf;
   const uint32_t bytes = s_workInfo.sendItem.size, 
-             n64words = bytes / sizeof(uint64_t);
+             nwords = bytes / sizeof(Word);
 
-  auto targetBuf = (uint64_t *)s_workInfo.targetBuf;
-  constexpr uint32_t NumRegs = 4;
-  uint64_t regs[NumRegs];
+  auto targetBuf = (Word *)s_workInfo.targetBuf;
+  Word regs[NumRegs]; 
 
   // each thread loads 8 or 16 bytes of data ??
-  for(uint32_t ofs = tid*2; ofs < n64words; ) {
+  for(uint32_t ofs = tid*2; ofs < nwords; ) {
     if(tid == 0) {
-      gprint("running ofs: %d n64words: %d", ofs, n64words);
+      gprint("running ofs: %d nwords: %d", ofs, nwords);
     }
     auto src_ofs = ofs;
 #pragma unroll
     // we can load BlockSz * NumRegs in one step here
     for(uint32_t i = 0; i < NumRegs/2; i++) {
-      if(src_ofs < n64words)
+      //if(src_ofs < nwords)
         regs[2*i] = LOAD(srcBuf + src_ofs);
-      if(src_ofs + 1< n64words)
+      //if(src_ofs + 1< nwords)
         regs[2*i + 1] = LOAD(srcBuf + src_ofs + 1);
       src_ofs += BlockSz*2;
     }
 #pragma unroll
     for(uint32_t i = 0; i < NumRegs/2; i++) {
-      if(ofs < n64words)
+      //if(ofs < nwords)
         STORE(regs[2*i], targetBuf + ofs);
-      if(ofs + 1 < n64words)
+      //if(ofs + 1 < nwords)
         STORE(regs[2*i + 1], targetBuf + ofs + 1);
       ofs += BlockSz*2;
     }

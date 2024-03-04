@@ -18,6 +18,22 @@
 #define USE_CUSTOM_QCCL 1
 #define VERIFY_DATA 1
 
+#if 0
+Using device 0: AMD Instinct MI300X ( SM940, 304 SMs, 196148 free / 196592 total MB physmem, 2662.400 GB/s @ 1300000 kHz mem clock, ECC off)
+Num devices: 2; max data size: 283.5 Mb; neighbour exchange with RCCL
+Data size: 8.86 Mb; time elapsed: 0.493 ms, bandwidth: 18.847 Gb/s
+Data size: 13.29 Mb; time elapsed: 0.702 ms, bandwidth: 19.840 Gb/s
+Data size: 19.93 Mb; time elapsed: 1.030 ms, bandwidth: 20.302 Gb/s
+Data size: 29.90 Mb; time elapsed: 1.502 ms, bandwidth: 20.876 Gb/s
+Data size: 44.85 Mb; time elapsed: 1.368 ms, bandwidth: 34.386 Gb/s
+Data size: 67.28 Mb; time elapsed: 2.004 ms, bandwidth: 35.207 Gb/s
+Data size: 100.91 Mb; time elapsed: 2.976 ms, bandwidth: 35.556 Gb/s
+Data size: 151.37 Mb; time elapsed: 4.422 ms, bandwidth: 35.892 Gb/s
+Data size: 227.06 Mb; time elapsed: 6.565 ms, bandwidth: 36.265 Gb/s
+Data size: 283.50 Mb; time elapsed: 8.175 ms, bandwidth: 36.365 Gb/s
+Thread pool joined
+#endif
+
 #define CHKNCCL(cmd) \
   if(auto res = (cmd); res != ncclSuccess) {           \
     PRINTZ("Test NCCL failure %s:%d '%s'",              \
@@ -346,7 +362,6 @@ public:
             sendP, info.sendBuf, size));
     }
     CHKQCCL(qcclRun(id, info.streams[0]));
-    VLOG("------------!");
 
 #else // USE_CUSTOM_QCCL
     auto type = getNcclType();
@@ -473,7 +488,6 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
 #if VERIFY_DATA
    obj.run(elemsMin, 1, false, true); // first run to verify data
 #endif
-  return;
 
   obj.run(elemsMax, (nwarmups+1)/2);
   obj.run(elemsMin, nwarmups/2);
