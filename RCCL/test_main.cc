@@ -16,7 +16,7 @@
 #include "qccl_lib.h"
 
 #define USE_CUSTOM_QCCL 1
-#define VERIFY_DATA 1
+#define VERIFY_DATA 0
 
 #if 0
 Using device 0: AMD Instinct MI300X ( SM940, 304 SMs, 196148 free / 196592 total MB physmem, 2662.400 GB/s @ 1300000 kHz mem clock, ECC off)
@@ -105,6 +105,9 @@ class GpuComm {
   ThreadPool m_pool;
   Matrix<Node> m_stageA, m_stageB; // "topology graphs" for stage1 all-to-all and stage 2
 
+  constexpr static uint8_t s_fillValue = 0xCC;
+  constexpr static uint8_t s_oobValue = 0xDD;
+  constexpr static uint32_t s_redzoneElems = 64; // number of OOB elements for redzone check
   constexpr static uint32_t s_nExtraPeers = 0; // if zero, all traffic is sent directly
   constexpr static double s_splitFactor = 1.0; // this much of traffic is sent to target GPUs directly
   constexpr static uint32_t s_bogus = 0xFFFFFFFFu; // to catch uninitialized entries
@@ -291,7 +294,8 @@ public:
 
     m_pool.runJob([this](int id) {
       auto& info = m_infos[id];
-      size_t nBytes = m_maxElems*sizeof(T);
+      size_t obytes = s_redzoneElems*sizeof(T),
+            nBytes = (m_maxElems + s_redzoneElems)*sizeof(T);
       {
         std::lock_guard _(m_verifyMtx);
         VLOG("Allocating buffers and data init for GPU " << id);
@@ -303,14 +307,18 @@ public:
                   // hipDeviceMallocUncached;
                   // hipMallocSignalMemory;
       CHK(hipExtMallocWithFlags((void **)&info.sendBuf, nBytes*2, flags));
-      info.recvBuf = info.sendBuf + m_maxElems;
+      info.recvBuf = info.sendBuf + m_maxElems + s_redzoneElems;
 
       info.streams.resize(s_nExtraPeers + 1);
       for(auto& s : info.streams) {
         CHK(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking));
       }
 
-      CHK(cudaMemset(info.recvBuf, 0, nBytes));
+      CHK(cudaMemset(info.sendBuf, s_fillValue ^ 0xFF, nBytes - obytes));
+      CHK(cudaMemset(info.sendBuf + m_maxElems, s_oobValue ^ 0xFF, obytes));
+      CHK(cudaMemset(info.recvBuf, s_fillValue, nBytes - obytes));
+      CHK(cudaMemset(info.recvBuf + m_maxElems, s_oobValue, obytes));
+
       std::vector< T > refBuf(m_maxElems);
 #if VERIFY_DATA
       for(size_t i = 0; i < m_maxElems; i++) {
@@ -331,11 +339,12 @@ public:
 
   void verify(int id) {
     std::lock_guard _(m_verifyMtx);
-    if(m_hostBuf.size() < m_curElems) {
-      m_hostBuf.resize(m_curElems);
+    auto sz = m_curElems + s_redzoneElems;
+    if(m_hostBuf.size() < sz) {
+      m_hostBuf.resize(sz);
     }
     auto dst = m_hostBuf.data();
-    CHK(cudaMemcpy(dst, m_infos[id].recvBuf, m_curElems*sizeof(T), cudaMemcpyDeviceToHost));
+    CHK(cudaMemcpy(dst, m_infos[id].recvBuf, sz*sizeof(T), cudaMemcpyDeviceToHost));
     // Node id should receive original data from node m_stageA[id][0].in
     auto t = m_stageA[id][0].in;
     VLOG("Device " << id << " verifying: expecting data from node: " << t);
@@ -344,6 +353,14 @@ public:
       if(dst[j] != truth) {
         //ThrowError<>("%d: verify failed truth: %f gpu: %f", j, truth, dst[j]);
         PRINTZ("%X: verify failed truth: %f gpu: %f", j, truth, dst[j]);
+        if(num++ >= 5)
+          break;
+      }
+    }
+    auto bdst = (const uint8_t *)(dst + m_curElems);
+    for(uint32_t j = 0, num = 0; j < s_redzoneElems*sizeof(T); j++) {
+      if(bdst[j] != s_oobValue) {
+        PRINTZ("%X: redzone value modified truth: %X gpu %X", j, s_oobValue, bdst[j]);
         if(num++ >= 5)
           break;
       }
@@ -486,8 +503,9 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
   GpuComm<T> obj(nGpus, elemsMax);
   obj.init();
 #if VERIFY_DATA
-   obj.run(elemsMin, 1, false, true); // first run to verify data
+  obj.run(elemsMin, 1, false, true); // first run to verify data
 #endif
+  // return;
 
   obj.run(elemsMax, (nwarmups+1)/2);
   obj.run(elemsMin, nwarmups/2);
@@ -525,8 +543,8 @@ int main() try
 {
   DeviceInit(0);
   size_t sMin = 9289728/4, sMax = 9289728*8;
-  //size_t sMin = 1024, sMax = 1024;
-  runRCCLTest<float>(sMin, sMax);
+  //size_t sMin = 1011*111, sMax = sMin;
+  runRCCLTest<uint32_t>(sMin, sMax);
 }
 catch(std::exception& ex) {
   VLOG("Exception: " << ex.what());

@@ -122,7 +122,7 @@ class GpuCommLib {
 
   static constexpr size_t s_defNumWorkItems = 8;
   static constexpr size_t s_numWorkThreads = 512;
-  static constexpr size_t s_numRegsPerThread = 32;
+  static constexpr size_t s_numRegsPerThread = 16;
 
   struct ThreadInfo {
     int gpuId;             // gpu ID assigned to this thread
@@ -174,6 +174,14 @@ public:
       }
     } // for info
     m_initialized = true;
+
+#if 0
+    int nBlocks = 0;
+    CHK(hipOccupancyMaxActiveBlocksPerMultiprocessor(&nBlocks, 
+      rcclKernel<s_numWorkThreads, s_numRegsPerThread>, s_numWorkThreads, 
+      sizeof(WorkInfo)));
+    VLOG("Max blocks per SM: " << nBlocks);
+#endif
     return QCCL_Result::OK;
   }
 
@@ -270,7 +278,6 @@ QCCL_Result qcclRun(uint32_t ID, cudaStream_t stream) {
 
 __shared__ WorkInfo s_workInfo;
 
-
 // ltid is a local tid within group !!!
 __forceinline__ __device__ void setupRecvPtrs(uint32_t ltid) {
 
@@ -292,7 +299,7 @@ __forceinline__ __device__ void setupRecvPtrs(uint32_t ltid) {
   }
 }
 
-__forceinline__  __device__ void setupSendPtrs(uint32_t ltid) {
+__forceinline__ __device__ void setupSendPtrs(uint32_t ltid) {
 
   auto& item = s_workInfo.sendItem;
   if(ltid == 0) {
@@ -307,6 +314,30 @@ __forceinline__  __device__ void setupSendPtrs(uint32_t ltid) {
     *slot = nullptr;
     gprint("%p: Received target buf: %p from peer %d", 
             slot, s_workInfo.targetBuf, s_workInfo.recvItem.peer);
+  }
+}
+
+template < uint32_t BlockSz, uint32_t NumRegs, typename Word >
+__forceinline__ __device__ 
+void copyMainLoop(uint32_t tid, const uint32_t niters, 
+      Word (&regs)[NumRegs], const Word *srcBuf, Word *targetBuf) {
+
+  // NOTe this version works if the number of bytes is divisible by 16!
+  for(uint32_t ofs = tid*2, s = 0; s < niters; s++) {
+    auto src_ofs = ofs;
+#pragma unroll
+    for(uint32_t i = 0; i < NumRegs/2; i++, src_ofs += BlockSz*2) {
+      regs[2*i] = LOAD(srcBuf + src_ofs);
+      regs[2*i + 1] = LOAD(srcBuf + src_ofs + 1);
+    }
+#pragma unroll
+    for(uint32_t i = 0; i < NumRegs/2; i++, ofs += BlockSz*2) {
+      STORE(regs[2*i], targetBuf + ofs);
+      STORE(regs[2*i + 1], targetBuf + ofs + 1);
+    }
+  } // for ofs
+  if(s_workInfo.recvItem.peer == 0) {
+   // gprint("%d: ofs left: %d -- %d", tid, ofs, s);
   }
 }
 
@@ -338,35 +369,30 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
   using Word = uint64_t;
   auto srcBuf = (const Word *)s_workInfo.sendItem.dataBuf;
   const uint32_t bytes = s_workInfo.sendItem.size, 
-             nwords = bytes / sizeof(Word);
+                 nwords = bytes / sizeof(Word);
 
   auto targetBuf = (Word *)s_workInfo.targetBuf;
   Word regs[NumRegs]; 
 
-  // each thread loads 8 or 16 bytes of data ??
-  for(uint32_t ofs = tid*2; ofs < nwords; ) {
-    if(tid == 0) {
-      gprint("running ofs: %d nwords: %d", ofs, nwords);
-    }
-    auto src_ofs = ofs;
-#pragma unroll
-    // we can load BlockSz * NumRegs in one step here
-    for(uint32_t i = 0; i < NumRegs/2; i++) {
-      //if(src_ofs < nwords)
-        regs[2*i] = LOAD(srcBuf + src_ofs);
-      //if(src_ofs + 1< nwords)
-        regs[2*i + 1] = LOAD(srcBuf + src_ofs + 1);
-      src_ofs += BlockSz*2;
-    }
-#pragma unroll
-    for(uint32_t i = 0; i < NumRegs/2; i++) {
-      //if(ofs < nwords)
-        STORE(regs[2*i], targetBuf + ofs);
-      //if(ofs + 1 < nwords)
-        STORE(regs[2*i + 1], targetBuf + ofs + 1);
-      ofs += BlockSz*2;
-    }
-  } // for ofs
+  if(tid == 0) {
+      uint32_t nFullIters = nwords / (BlockSz*NumRegs),
+              bytesPerIter = BlockSz*NumRegs*sizeof(Word),
+              bytesLeft = bytes - nFullIters*bytesPerIter;
+      gprint("nwords: %d; bytes: %d mod16: %d nFullIters: %d "
+             "bytesPerIter: %d bytesLeft: %d", 
+            nwords, bytes, bytes%16, nFullIters, bytesPerIter, bytesLeft);
+  }
+  const uint32_t niters = nwords / (BlockSz * NumRegs);
+  copyMainLoop< BlockSz, NumRegs >(tid, niters, regs, srcBuf, targetBuf);
+
+  __syncthreads();
+  if(tid == 0) {
+    auto bb = (uint32_t *)targetBuf;
+    uint32_t ww = bytes / 4;
+    gprint("peer: %d data %d %d %d %d", 
+        s_workInfo.recvItem.peer, bb[ww-2], bb[ww-1], bb[ww], bb[ww+1]);
+  }
+
   __threadfence_system(); // TODO check if it's correct
 
   // NOTE: it could be that some channel is only sender or only receiver ??
@@ -432,3 +458,4 @@ catch(...) {
   VLOG("Unknown exception");
 }
 #endif 
+//
