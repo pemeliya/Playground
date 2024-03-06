@@ -220,21 +220,42 @@ void GpuComm<T>::verify(int id) {
     }
   }
 
+#if USE_CUSTOM_QCCL
 template < class T >
 void GpuComm<T>::run_single_gpu(int id, int stage) 
-  {
-    auto& info = m_infos[id];
-    const auto& V = stage == 0 ? m_stageA[id] : m_stageB[id];
-#if USE_CUSTOM_QCCL
+{
+  auto& info = m_infos[id];
+  const auto& V = stage == 0 ? m_stageA[id] : m_stageB[id];
+
+#if 0
     for(int i = 0; i <= s_nExtraPeers; i++) {
         int sendP = V[i].out, recvP = V[i].in;
         auto size = m_sizes[i] * sizeof(T);
         CHKQCCL(qcclSendRecv(id, recvP, info.recvBuf, size,
             sendP, info.sendBuf, size));
+    } 
+#else
+    auto size = m_sizes[0] * sizeof(T);
+    if(id == 0 || id == 1) {
+      // we send and receive to/from the same node (bidirectional)
+      int sendP = 1 - id, recvP = 1 - id;
+      CHKQCCL(qcclSendRecv(id, recvP, info.recvBuf, size,
+            sendP, info.sendBuf, size));
+    } else if(id == 2) {
+      // create gateway peer
+      CHKQCCL(qcclGatewaySend(id, 0, 1, size, size));
     }
+#endif
     CHKQCCL(qcclRun(id, info.streams[0]));
+}
+#else // !USE_CUSTOM_QCCL
 
-#else // USE_CUSTOM_QCCL
+template < class T >
+void GpuComm<T>::run_single_gpu(int id, int stage) 
+{
+  auto& info = m_infos[id];
+  const auto& V = stage == 0 ? m_stageA[id] : m_stageB[id];
+
     auto type = getNcclType();
     int rank;
     // CHKNCCL(ncclCommCount(m_comms[i], &nRanks));
@@ -264,8 +285,8 @@ void GpuComm<T>::run_single_gpu(int id, int stage)
       }
     }
     CHKNCCL(ncclGroupEnd());
+}
 #endif // USE_CUSTOM_QCCL
-  }
 
 template < class T >
 void GpuComm<T>::run(size_t numElems, int numIters, bool measureTime, bool verifyData) {
@@ -350,7 +371,7 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
 {
   int nGpus = 0, nwarmups = 5, niters = 10;
   CHK(hipGetDeviceCount(&nGpus));
-  // nGpus = 2;
+  nGpus = 3;
   VLOG("Num devices: " << nGpus << "; max data size: " << (double)(elemsMax*sizeof(T))/(1024*1024) << 
         " Mb; neighbour exchange with "
 #if USE_CUSTOM_QCCL
@@ -365,7 +386,7 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
 #if VERIFY_DATA
   obj.run(elemsMin, 1, false, true); // first run to verify data
 #endif
-  // return;
+  return;
 
   obj.run(elemsMax, (nwarmups+1)/2);
   obj.run(elemsMin, nwarmups/2);

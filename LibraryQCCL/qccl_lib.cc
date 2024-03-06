@@ -13,7 +13,7 @@
 #include "common/threading.hpp"
 #include "common/example_utils.hpp"
 
-#if 0
+#if 1
 #define gprint(fmt, ...) printf(fmt"\n", ##__VA_ARGS__)
 #else
 #define gprint(fmt, ...)
@@ -35,7 +35,7 @@
 #define ATOMIC_LOAD(VAR)       __atomic_load_n((VAR),         __ATOMIC_ACQUIRE)
 #define ATOMIC_STORE(DST, SRC) __atomic_store_n((DST), (SRC), __ATOMIC_RELEASE)
 
-struct P2PWorkItem {
+struct SendWorkItem {
   uint32_t peer;      // send/recv peer
   uint32_t size;      // buffer size in bytes (limited by 4GB!)
   void **exchangeBuf; // shared buffer for exchanging pointers between GPUs:
@@ -44,9 +44,21 @@ struct P2PWorkItem {
   void *dataBuf;      // send/recv buffer 
 };
 
+struct RecvWorkItem {
+  uint32_t peer;      // send/recv peer
+  uint32_t role;      // role: used to distinguish between normal and gateway nodes
+  void **exchangeBuf; // shared buffer for exchanging pointers between GPUs:
+                      // this should be set accordingly for each p2p channel (pair of GPUs)
+                      // It has two entries: one for ptr exchange and one for end-of-transfer flag
+  void *dataBuf;      // send/recv buffer 
+};
+
+
 struct WorkInfo
 {
-  P2PWorkItem recvItem, sendItem;
+  uint32_t ID;        // my own ID
+  RecvWorkItem recv;
+  SendWorkItem send;
   void *targetBuf;    // target buffer address obtained from the receiver
 };
 
@@ -122,9 +134,7 @@ public:
     return QCCL_Result::OK;
   }
 
-  // function run on a thread: this ID receives from recvPeer and 
-  // sends to sendPeer
-  QCCL_Result enqueueSendRecv(uint32_t ID, uint32_t recvPeer, void *recvBuf,
+  QCCL_Result sendRecv(uint32_t ID, uint32_t recvPeer, void *recvBuf,
         size_t recvSize, uint32_t sendPeer, void *sendBuf, size_t sendSize) {
 
     if(!m_initialized) return QCCL_Result::NotInitialized;
@@ -132,21 +142,59 @@ public:
     auto& info = m_infos[ID];
     // NOTE: exchange pointers are always allocated on the receiver side!!
     auto& w = info.workItems.emplace_back();
-    w.recvItem = { // whom we are receiving from
+    w.ID = ID;
+    w.recv = { // whom we are receiving from
           .peer = recvPeer,
-          .size = (uint32_t)recvSize,
+          .role = 0,
           // exchange buf on the receiver side: two entries per link
+          // (we are receiver here)
           .exchangeBuf = (void **)m_infos[ID].exchangeBuf + recvPeer*2,
           .dataBuf = recvBuf,
     };
-    w.sendItem = { // whom we are sending to
+    w.send = { // whom we are sending to
           .peer = sendPeer,
           .size = (uint32_t)sendSize,
           // exchange buf on the receiver side: two entries per link
+          // node 'sendPeer' is a receiver 
           .exchangeBuf = (void **)m_infos[sendPeer].exchangeBuf + ID*2, 
           .dataBuf = sendBuf,
     };
     w.targetBuf = nullptr;
+    return QCCL_Result::OK;
+  }
+
+  // 0 --> 1
+  // 0 --> 2 --> 1
+  // 2 needs read buffer from 0 and write buffer from 1
+  // for node zero sendPeer is 1, hence node 0 will be waiting for node 1
+  // to get write buffer from node 1, the gateway node '2' must connect 
+  // to node's 1 exchange buffer with node 0
+
+  QCCL_Result gatewaySend(uint32_t ID, uint32_t peerStart, uint32_t peerEnd, 
+        size_t dataOfs, size_t dataSize) {
+
+    if(!m_initialized) return QCCL_Result::NotInitialized;
+    if(ID >= m_infos.size()) return QCCL_Result::InvalidParams;
+    auto& info = m_infos[ID];
+
+    // here we are receiving from 'peerStart' and forwarding to 'peerEnd'
+    auto& w = info.workItems.emplace_back();
+    w.ID = ID;
+    // exchange buf is always on the "other" side for gateway nodes
+    w.recv = { // whom we are receiving from
+          .peer = peerStart,
+          .role = 1,
+          .exchangeBuf = nullptr,//(void **)m_infos[ID].exchangeBuf + recvPeer*2,
+          .dataBuf = nullptr,
+    };
+    w.send = { // whom we are sending to
+          .peer = peerEnd,
+          .size = (uint32_t)dataSize,
+          // we are attaching to peerStart -- peerEnd communication link
+          // since there must be a direct connection from peerStart to peerEnd too
+          .exchangeBuf = (void **)m_infos[peerEnd].exchangeBuf + peerStart*2, 
+          .dataBuf = nullptr,
+    };
     return QCCL_Result::OK;
   }
 
@@ -161,8 +209,8 @@ public:
       allocWorkBuf(&info, info.numDevWorkItems * 3 / 2);
     }
     uint32_t nBlocks = info.workItems.size();
-    // VLOG("Work Item size: " << sizeof(WorkInfo) << " executing with #blocks:" 
-    //       << nBlocks);
+    VLOG(ID << ": workItemSz: " << sizeof(WorkInfo) << " running with #blocks:" 
+           << nBlocks);
 
     CHK(cudaMemcpyAsync(info.workBuf, info.workItems.data(), 
           sizeof(WorkInfo) * nBlocks, cudaMemcpyHostToDevice, stream));
@@ -195,20 +243,6 @@ protected:
 
 }; // GpuCommLib
 
-QCCL_Result qcclInit(uint32_t nGpus) {
-  return GpuCommLib::i().init(nGpus);
-}
-
-QCCL_Result qcclSendRecv(uint32_t ID, uint32_t recvPeer, void *recvBuf,
-        size_t recvSize, uint32_t sendPeer, void *sendBuf, size_t sendSize) {
-  return GpuCommLib::i().enqueueSendRecv(ID, recvPeer, recvBuf,
-        recvSize, sendPeer, sendBuf, sendSize);
-}
-
-QCCL_Result qcclRun(uint32_t ID, cudaStream_t stream) {
-  return GpuCommLib::i().run(ID, stream);
-}
-
 //Matrix< WorkInfo > p2pSend, p2pRecv;
 // ncclSend(a,b) -> set p2pSend(a,b) = sendBuf, sendSize (a sends to b) => a needs to get recv buffer from b
 // ncclRecv(b,a) -> set p2pRecv(b,a) = recvBuf, recvSize (b receives from a) => b needs give its recv buffer to a
@@ -220,7 +254,7 @@ __forceinline__ __device__ void setupRecvPtrs(uint32_t ltid) {
 
   // we provide the sender our receive buffer
   if(ltid == 0) {
-    auto& item = s_workInfo.recvItem;
+    auto& item = s_workInfo.recv;
     void *volatile *slot = item.exchangeBuf;
     *(uint32_t *)(slot + 1) = 0; // reset 'receive complete' flag
 
@@ -231,16 +265,19 @@ __forceinline__ __device__ void setupRecvPtrs(uint32_t ltid) {
     // the empty slot value.
     *slot = (void *)(reinterpret_cast<uintptr_t>(item.dataBuf) ^ 
                      reinterpret_cast<uintptr_t>(slot));
-    gprint("%p Sent target buffer: %p to the sender peer %d", 
-          slot, item.dataBuf, s_workInfo.sendItem.peer);
+    gprint("%d / %p: Sent target buffer: %p to sender peer %d", 
+          s_workInfo.ID, slot, item.dataBuf, s_workInfo.send.peer);
   }
 }
 
 __forceinline__ __device__ void setupSendPtrs(uint32_t ltid) {
 
-  auto& item = s_workInfo.sendItem;
+  auto& item = s_workInfo.send;
   if(ltid == 0) {
     void *volatile *slot = item.exchangeBuf;
+    gprint("%d / %p: Starting receive target buf",
+      s_workInfo.ID, slot);
+
     void *ptr;
     while (true) {
       ptr = (void *)atomicAdd((uint64_t *)slot, 0);
@@ -248,9 +285,9 @@ __forceinline__ __device__ void setupSendPtrs(uint32_t ltid) {
     }
     s_workInfo.targetBuf = (void *)(reinterpret_cast<uintptr_t>(ptr) ^ 
                                     reinterpret_cast<uintptr_t>(slot));
-    *slot = nullptr;
-    gprint("%p: Received target buf: %p from peer %d", 
-            slot, s_workInfo.targetBuf, s_workInfo.recvItem.peer);
+    // *slot = nullptr;
+    gprint("%d / %p: Received target buf: %p from peer %d", 
+            s_workInfo.ID, slot, s_workInfo.targetBuf, s_workInfo.recv.peer);
   }
 }
 
@@ -259,7 +296,7 @@ template < typename Word, uint32_t BlockSz, uint32_t NumRegs,
 __forceinline__ __device__ 
 void copyMainLoop(uint32_t ofs, const uint32_t niters, const uint32_t nwords) {
 
-  auto srcBuf = (const Word *)s_workInfo.sendItem.dataBuf;
+  auto srcBuf = (const Word *)s_workInfo.send.dataBuf;
   auto targetBuf = (Word *)s_workInfo.targetBuf;
 
   Word regs[NumRegs];
@@ -281,9 +318,9 @@ void copyMainLoop(uint32_t ofs, const uint32_t niters, const uint32_t nwords) {
     }
     if(!UseOuterLoop) break;
   } // for ofs
-  if(s_workInfo.recvItem.peer == 0) {
+  if(s_workInfo.recv.peer == 0) {
     // uint32_t tid = threadIdx.x;
-    // int diff = s_workInfo.sendItem.size - ofs*sizeof(Word);
+    // int diff = s_workInfo.send.size - ofs*sizeof(Word);
     // gprint("%d: ofs: %d byteOfs: %d diff: %d", tid, ofs, ofs*sizeof(Word), 
     //       diff);
   }
@@ -304,18 +341,33 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
   }
   __syncthreads();
 
+  bool isGateway = s_workInfo.recv.role == 1;
+
   // we will use directWrite: that is, each sender writes data to receiver buffer directly
   // for that, receiver should provide sender the buffer address
   if(tid < warpSize) {
-    setupRecvPtrs(tid);
+    if(!isGateway) {
+      setupRecvPtrs(tid);
+    }
   } else if(tid < warpSize*2) {
     setupSendPtrs(tid - warpSize);
   }
 
+  if(isGateway) {
+    //s_workInfo.send.dataBuf = <source buffer>
+  }
+
   __syncthreads();
 
+  if(tid == 0) {
+    gprint("============= %d: my target buffer: %p", s_workInfo.ID, s_workInfo.targetBuf);
+  }
+
+  if(isGateway)
+    return;
+
   using Word = uint64_t;
-  const uint32_t bytes = s_workInfo.sendItem.size, 
+  const uint32_t bytes = s_workInfo.send.size, 
                  nwords = bytes / sizeof(Word),
                  niters = nwords / (BlockSz * NumRegs);
 /*
@@ -376,14 +428,35 @@ Data size: 283.50 Mb; time elapsed: 8.613 ms, bandwidth: 34.515 Gb/s
 
   // NOTE: it could be that some channel is only sender or only receiver ??
 
-  auto recvDone = (volatile uint32_t *)(s_workInfo.recvItem.exchangeBuf + 1);
-  auto sendDone = (volatile uint32_t *)(s_workInfo.sendItem.exchangeBuf + 1);
+  auto recvDone = (volatile uint32_t *)(s_workInfo.recv.exchangeBuf + 1);
+  auto sendDone = (volatile uint32_t *)(s_workInfo.send.exchangeBuf + 1);
   sendDone[0] = 11111;
   // __atomic_store_n(send_done, 1, __ATOMIC_SEQ_CST);
 
   if(tid == 0) {
-    gprint("Receiver waiting peer: %d", s_workInfo.sendItem.peer);
+    gprint("Receiver waiting peer: %d", s_workInfo.send.peer);
     while(atomicAdd((uint32_t *)recvDone, 0u) != 11111u);
-    gprint("Waiting done.. %d", s_workInfo.sendItem.peer);
+    gprint("Waiting done.. %d", s_workInfo.send.peer);
   }
 }
+
+QCCL_Result qcclInit(uint32_t nGpus) {
+  return GpuCommLib::i().init(nGpus);
+}
+
+QCCL_Result qcclSendRecv(uint32_t ID, uint32_t recvPeer, void *recvBuf,
+        size_t recvSize, uint32_t sendPeer, void *sendBuf, size_t sendSize) {
+  return GpuCommLib::i().sendRecv(ID, recvPeer, recvBuf,
+        recvSize, sendPeer, sendBuf, sendSize);
+}
+
+// register node ID as being a gateway for sending data from peerStart to peerEnd
+QCCL_Result qcclGatewaySend(uint32_t ID, uint32_t peerStart, uint32_t peerEnd, 
+        size_t dataOfs, size_t dataSize) {
+  return GpuCommLib::i().gatewaySend(ID, peerStart, peerEnd, dataOfs, dataSize);
+}
+
+QCCL_Result qcclRun(uint32_t ID, cudaStream_t stream) {
+  return GpuCommLib::i().run(ID, stream);
+}
+
