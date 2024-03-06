@@ -56,73 +56,11 @@ static_assert(sizeof(WorkInfo) % sizeof(uint64_t) == 0,
 template < uint32_t BlockSz, uint32_t NumRegs >
 __global__ void rcclKernel(WorkInfo *gworkInfo);
 
-template < class T >
-struct SendRecvItem {
-
-  int gpuId = -1;
-  size_t numElems = 0;
-  T *sendBuf = nullptr, *recvBuf = nullptr; // send and receive buffers
-  std::vector< T > hostBuf;
-  cudaStream_t stream;  // associated stream
-
-  SendRecvItem() = default;
-  SendRecvItem(SendRecvItem&) = delete;
-  SendRecvItem& operator =(SendRecvItem&) = delete;
-
-  T getElem(int ID, int idx) {
-    return (T)ID + 11;
-  }
-
-  void init(int _gpuId, size_t _numElems)
-  {
-    gpuId = _gpuId, numElems = _numElems; 
-    size_t nBytes = numElems * sizeof(T);
-    hostBuf.resize(numElems);
-    CHK(cudaSetDevice(gpuId));
-    int flags = hipDeviceMallocDefault;
-                //hipDeviceMallocFinegrained;
-                // hipDeviceMallocUncached;
-                // hipMallocSignalMemory;
-    CHK(hipExtMallocWithFlags((void **)&sendBuf, nBytes*2, flags));
-    recvBuf = sendBuf + numElems;
-    CHK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
-
-    for(uint32_t i = 0; i < numElems; i++) {
-      hostBuf[i] = getElem(gpuId, i);
-    }
-    CHK(cudaMemcpyAsync(sendBuf, hostBuf.data(), nBytes, 
-                                           cudaMemcpyHostToDevice, stream));
-  }
-
-  void verify(uint32_t recvPeer) {
-    
-    VLOG("Device " << gpuId << " verifying: data from node: " << recvPeer
-        << " recvBuf: " << recvBuf);
-    for(uint32_t j = 0, num = 0; j < numElems; j++) {
-      auto truth = getElem(recvPeer, j);
-      if(hostBuf[j] != truth) {
-        //ThrowError<>("%d: verify failed truth: %f gpu: %f", j, truth, dst[j]);
-        PRINTZ("%X: verify failed truth: %u gpu: %u", j, truth, hostBuf[j]);
-        if(num++ >= 5)
-          break;
-      }
-    }
-  }
-
-  ~SendRecvItem() {
-    if(gpuId >= 0) {
-      (void)cudaSetDevice(gpuId);
-      (void)cudaStreamDestroy(stream);
-      (void)cudaFree(sendBuf);
-    }
-  }
-};
-
 class GpuCommLib {
 
   static constexpr size_t s_defNumWorkItems = 8;
   static constexpr size_t s_numWorkThreads = 512;
-  static constexpr size_t s_numRegsPerThread = 16;
+  static constexpr size_t s_numRegsPerThread = 24;
 
   struct ThreadInfo {
     int gpuId;             // gpu ID assigned to this thread
@@ -167,8 +105,7 @@ public:
         int enable = -1;
         CHK(cudaDeviceCanAccessPeer(&enable, info.gpuId, j));
         if(enable == 0) {
-          ThrowError<>("GPU %d is unable to access peer %d",
-                info.gpuId, j);
+          ThrowError<>("GPU %d is unable to access peer %d", info.gpuId, j);
         }
         CHK(cudaDeviceEnablePeerAccess(j, 0));
       }
@@ -381,9 +318,33 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
   const uint32_t bytes = s_workInfo.sendItem.size, 
                  nwords = bytes / sizeof(Word),
                  niters = nwords / (BlockSz * NumRegs);
+/*
+Speed with 24 regs / 512 threads
+Data size: 8.86 Mb; time elapsed: 0.307 ms, bandwidth: 30.245 Gb/s
+Data size: 13.29 Mb; time elapsed: 0.434 ms, bandwidth: 32.139 Gb/s
+Data size: 19.93 Mb; time elapsed: 0.608 ms, bandwidth: 34.401 Gb/s
+Data size: 29.90 Mb; time elapsed: 0.878 ms, bandwidth: 35.701 Gb/s
+Data size: 44.85 Mb; time elapsed: 1.287 ms, bandwidth: 36.554 Gb/s
+Data size: 67.28 Mb; time elapsed: 1.905 ms, bandwidth: 37.038 Gb/s
+Data size: 100.91 Mb; time elapsed: 2.824 ms, bandwidth: 37.475 Gb/s
+Data size: 151.37 Mb; time elapsed: 4.226 ms, bandwidth: 37.562 Gb/s
+Data size: 227.06 Mb; time elapsed: 6.295 ms, bandwidth: 37.820 Gb/s
+Data size: 283.50 Mb; time elapsed: 8.474 ms, bandwidth: 35.082 Gb/s
 
+Speed with 32 regs / 512 threads
+Data size: 8.86 Mb; time elapsed: 0.309 ms, bandwidth: 30.089 Gb/s
+Data size: 13.29 Mb; time elapsed: 0.430 ms, bandwidth: 32.391 Gb/s
+Data size: 19.93 Mb; time elapsed: 0.615 ms, bandwidth: 34.005 Gb/s
+Data size: 29.90 Mb; time elapsed: 0.886 ms, bandwidth: 35.406 Gb/s
+Data size: 44.85 Mb; time elapsed: 1.309 ms, bandwidth: 35.930 Gb/s
+Data size: 67.28 Mb; time elapsed: 1.908 ms, bandwidth: 36.981 Gb/s
+Data size: 100.91 Mb; time elapsed: 2.831 ms, bandwidth: 37.374 Gb/s
+Data size: 151.37 Mb; time elapsed: 4.228 ms, bandwidth: 37.544 Gb/s
+Data size: 227.06 Mb; time elapsed: 6.300 ms, bandwidth: 37.793 Gb/s
+Data size: 283.50 Mb; time elapsed: 8.613 ms, bandwidth: 34.515 Gb/s
+*/
   copyMainLoop< Word, BlockSz, NumRegs, true, false >
-                        (tid*2, niters, 0);
+                         (tid*2, niters, 0);
 
   if(1)
   {
@@ -411,15 +372,6 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
     copyMainLoop< uint32_t, BlockSz, NumRegs*2, false, true >
                           (ofs, 1, nwords32);
   }
-
-  // __syncthreads();
-  // if(tid == 0) {
-  //   auto bb = (uint32_t *)s_workInfo.targetBuf;
-  //   uint32_t ww = bytes / 4;
-  //   gprint("peer: %d data %d %d %d %d", 
-  //       s_workInfo.recvItem.peer, bb[ww-2], bb[ww-1], bb[ww], bb[ww+1]);
-  // }
-
   __threadfence_system(); // TODO check if it's correct
 
   // NOTE: it could be that some channel is only sender or only receiver ??
@@ -435,54 +387,3 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
     gprint("Waiting done.. %d", s_workInfo.sendItem.peer);
   }
 }
-
-#if 0
-template < class T >
-void runRCCLTest()
-{
-  int nGpus = 0, elems = 1002;
-  CHK(cudaGetDeviceCount(&nGpus));
-  VLOG("Num devices: " << nGpus);
-  nGpus = 2;
-  GpuCommLib commLib(nGpus);
-  ThreadPool pool(nGpus);
-  Barrier barrier(nGpus);
-
-  std::vector< SendRecvItem<T> > items(nGpus);
-  std::mutex mtx;
-
-  pool.runJob([&](int id) {
-
-    auto& item = items[id];
-    int sendPeer = (id + 1)%nGpus, 
-        recvPeer = (id - 1 + nGpus)%nGpus;
-    PRINTZ("GPU %d recv from %d and sends to %d", id, recvPeer, sendPeer);
-    item.init(id, elems);
-    auto size = item.numElems * sizeof(T);
-    commLib.runSendRecv(id, recvPeer, item.recvBuf, size, 
-                            sendPeer, item.sendBuf, size, item.stream);
-
-    CHK(cudaMemcpyAsync(item.hostBuf.data(), item.recvBuf, size, 
-                          cudaMemcpyDeviceToHost, item.stream));
-    CHK(cudaStreamSynchronize(item.stream));
-
-    // so far receiver side is not synchronized => hence we need barrier
-    barrier.wait(); 
-    std::lock_guard _(mtx);
-    item.verify(recvPeer);
-  });
-}
-
-int main() try 
-{
-  DeviceInit(0);
-  runRCCLTest<uint32_t>();
-}
-catch(std::exception& ex) {
-  VLOG("Exception: " << ex.what());
-}
-catch(...) {
-  VLOG("Unknown exception");
-}
-#endif 
-//
