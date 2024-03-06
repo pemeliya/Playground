@@ -5,18 +5,17 @@
 #include <stdexcept>
 #include <iomanip>
 #include <iostream>
-#include <fstream>
 #include <numeric>
 #include <random>
-#include <thread>
 #include "common/threading.hpp"
 #include "common/example_utils.hpp"
 #include "common/roc_profiler.h"
 
+#include "test_main.h"
 #include "qccl_lib.h"
 
 #define USE_CUSTOM_QCCL 1
-#define VERIFY_DATA 0
+#define VERIFY_DATA 1
 
 #if 0
 Using device 0: AMD Instinct MI300X ( SM940, 304 SMs, 196148 free / 196592 total MB physmem, 2662.400 GB/s @ 1300000 kHz mem clock, ECC off)
@@ -40,82 +39,12 @@ Thread pool joined
         __FILE__,__LINE__, ncclGetErrorString(res));     \
   }
 
-template < class T >
-struct Matrix : std::vector< T > {
-
-  using Base = std::vector< T >;
-
-  Matrix(uint32_t nrows, uint32_t ncols, const T& val = {}) 
-            : Base(ncols*nrows, val),
-        m_nrows(nrows), m_ncols(ncols) {
-  }
-  // access the ith row
-  T *operator[](uint32_t i) { 
-    return Base::data() + i*m_ncols;
-  }
-  const T *operator[](uint32_t i) const {
-    return Base::data() + i*m_ncols;
-  }
-  auto numRows() const {
-    return m_nrows;
-  }
-  auto numCols() const {
-    return m_ncols;
-  }
-
-  std::string printRow(uint32_t row) const {
-    auto prow = (*this)[row];
-    std::ostringstream oss;
-    oss << '{';
-    for(uint32_t i = 0; i < m_ncols; i++) {
-      oss << prow[i];
-      if(i < m_ncols-1) oss << ',';
-    }
-    oss << '}';
-    return oss.str();
-  }
-
-private:
-  uint32_t m_nrows, m_ncols;
-};
+std::ostream& operator<<(std::ostream& ofs, const Node& n) {
+  return ofs << '(' << n.in << ',' << n.out << ')';
+}
 
 template < class T >
-class GpuComm {
-
-  struct ThreadInfo {
-    int gpuId;            // gpu ID assigned to this thread
-    std::vector< cudaStream_t > streams; // associated streams
-    T *sendBuf, *recvBuf; // send and receive buffers
-#if !USE_CUSTOM_QCCL
-    ncclComm_t comm;      // NCCL handle
-#endif
-    double elapsedMs;     // time elapsed per thread
-  };
-  struct Node {
-    uint32_t in, out; // this Node sends to Node[out] and receives from Node[in]
-  };
-
-  ncclUniqueId m_ncclId;
-  size_t m_nGpus, m_maxElems, m_curElems; // total and current data transfer size
-  bool m_measureTime = false;
-  std::vector< ThreadInfo > m_infos;
-  std::vector< T > m_hostBuf;
-  std::mutex m_verifyMtx;
-  Barrier m_barrier;
-  ThreadPool m_pool;
-  Matrix<Node> m_stageA, m_stageB; // "topology graphs" for stage1 all-to-all and stage 2
-
-  constexpr static uint8_t s_fillValue = 0xCC;
-  constexpr static uint8_t s_oobValue = 0xDD;
-  constexpr static uint32_t s_redzoneElems = 64; // number of OOB elements for redzone check
-  constexpr static uint32_t s_nExtraPeers = 0; // if zero, all traffic is sent directly
-  constexpr static double s_splitFactor = 1.0; // this much of traffic is sent to target GPUs directly
-  constexpr static uint32_t s_bogus = 0xFFFFFFFFu; // to catch uninitialized entries
-
-  std::vector< size_t > m_offsets, m_sizes;
-
-public:
-  GpuComm(size_t nGpus, size_t maxElems) : m_nGpus(nGpus), m_maxElems(maxElems),
+GpuComm<T>::GpuComm(size_t nGpus, size_t maxElems) : m_nGpus(nGpus), m_maxElems(maxElems),
       m_curElems(maxElems), m_infos(nGpus), m_barrier(nGpus), m_pool(nGpus),
       m_stageA(nGpus, s_nExtraPeers+1, Node{s_bogus,s_bogus}), 
       m_stageB(nGpus, s_nExtraPeers, Node{s_bogus,s_bogus})
@@ -125,7 +54,8 @@ public:
     }
   }
 
-  ~GpuComm() {
+template < class T >
+GpuComm<T>::~GpuComm() {
     for(auto& info : m_infos) {
       (void)cudaSetDevice(info.gpuId);
       for(auto& s : info.streams) {
@@ -138,103 +68,10 @@ public:
     }
   }
 
-  constexpr auto getNcclType() {
-#define OO(type, id) \
-  if constexpr(std::is_same_v<T, type>) return id
-    OO(int8_t, ncclInt8);
-    OO(uint8_t, ncclUint8);
-    OO(int32_t, ncclInt32);
-    OO(uint32_t, ncclUint32);
-    OO(int64_t, ncclInt64);
-    OO(uint64_t, ncclUint64);
-    OO(half, ncclFloat16);
-    OO(float, ncclFloat32);
-    OO(double, ncclFloat64);
-#undef OO
-  }
+template < class T >
+void GpuComm<T>::init_extra_peers() {
 
-  friend std::ostream& operator<<(std::ostream& ofs, const Node& n) {
-    return ofs << '(' << n.in << ',' << n.out << ')';
-  }
-
-  //! https://visjs.github.io/vis-network/examples/network/edgeStyles/smoothWorldCup.html
-  //! neato topology.dot -Tpng > topology.png 
-  void outputDot() {
-    static const char *colors[] = {
-        "aquamarine", "cornflowerblue", "chocolate1", "darkgreen",
-        "darkorchid", "deeppink", "fuchsia", "goldenrod2"};
-    uint32_t ncolors = sizeof(colors)/sizeof(colors[0]);
-
-    auto& m = m_stageA;
-    std::ofstream ofs("topology.dot");
-    ofs << "digraph G {\nsplines=true;\noverlap=scale\n";
-
-    float R = 5, x0 = 10, y0 = 10, da = -M_PI*2.0f/m.numRows();
-    for(uint32_t i = 0; i < m.numRows(); i++) {
-      float xf = x0 + R*std::cos(da*i + M_PI/2),
-            yf = y0 + R*std::sin(da*i + M_PI/2);
-      auto C = colors[i % ncolors];
-      ofs << i << " [pos=\"" << xf << ',' << yf << 
-            "!\", style=filled,color=\"" << C << "\",shape=circle];\n";
-    }
-    for(uint32_t i = 0; i < m.numRows(); i++) {
-      for(uint32_t j = 0; j < m.numCols(); j++) {
-        ofs << i << " -> " << m[i][j].out;
-        // check all GPUs and find the one having GPU i in (j+1)th position
-        ofs << " [color=" << colors[i % ncolors];
-        if(j == 0) {
-          ofs << ",penwidth=3.0];\n";
-        } else
-          ofs << ",penwidth=1.5];\n";
-      }
-    }
-
-    auto& m2 = m_stageB;
-    for(uint32_t i = 0; i < m2.numRows(); i++) {
-      for(uint32_t j = 0; j < m2.numCols(); j++) {
-        // how the data comes to node i at position j ??
-        uint32_t t = s_bogus;
-        for(uint32_t k = 0; k < m.numRows(); k++) {
-          if(k != i && m[k][j+1].out == i) {
-            t = k; break;
-          }
-        }
-        auto C = t == s_bogus ? "black" : colors[t % ncolors];
-        ofs << i << " -> " << m2[i][j].out;
-        ofs << " [color=" << C <<
-        ",style=\"dashed\",penwidth=1.5];\n";
-      }
-    }
-    ofs << '}';
-  }
-
-  std::vector< uint32_t > permuteOp() {
-    std::vector< uint32_t > permute(m_nGpus);
-    for(uint32_t i = 0; i < m_nGpus; i++) {
-      // this is cyclic neighbor exchange OP
-      permute[i] = (i + 1) % m_nGpus; // defines to which node GPU[i] should send its data
-    }
-#if 0
-    std::random_device rd;
-    std::mt19937 g(rd());
-    using Distr = std::uniform_int_distribution<uint32_t>;
-    using PP = Distr::param_type;
-    Distr D;
-    for (uint32_t i = m_nGpus - 1; (int)i > 0; i--)
-    while(1) {
-      uint32_t idx = D(g, PP(0, i));
-      if(permute[idx] != i) {
-        std::swap(permute[i], permute[idx]);
-        break;
-      }
-    }
-#endif
-    return permute;
-  }
-
-  void initExtraPeers() {
-
-    auto permute = permuteOp();
+    auto permute = permute_op(m_nGpus);
     for(uint32_t i = 0; i < m_nGpus; i++) {
       //VLOG(i << " permute: " << permute[i]);
       m_stageA[i][0].out = permute[i];  // gpu i sends to gpu permute[i]
@@ -268,23 +105,25 @@ public:
     }
     for(const auto& a : m_stageA) {
       if(a.in == s_bogus || a.out == s_bogus) {
-        ThrowError<>("Unitialized node for stageA!");
+        ThrowError<>("Uninitialized node for stageA!");
       }
     }
     for(const auto& b : m_stageB) {
       if(b.in == s_bogus || b.out == s_bogus) {
-        ThrowError<>("Unitialized node for stageB!");
+        ThrowError<>("Uninitialized node for stageB!");
       }
     }
-    outputDot();
+    output_dot(m_stageA, m_stageB);
   }
 
-  T getElement(int device, size_t idx) {
+template < class T >
+T GpuComm<T>::getElement(int device, size_t idx) {
     //return static_cast<T>(100.0f*std::sin((float)idx*2*M_PI/(device+2)));
     return static_cast<T>(device - 11111);
   }
 
-  void init() 
+template < class T >
+void GpuComm<T>::init() 
   {
 #if USE_CUSTOM_QCCL
     CHKQCCL(qcclInit(m_nGpus));
@@ -314,30 +153,44 @@ public:
         CHK(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking));
       }
 
-      CHK(cudaMemset(info.sendBuf, s_fillValue ^ 0xFF, nBytes - obytes));
-      CHK(cudaMemset(info.sendBuf + m_maxElems, s_oobValue ^ 0xFF, obytes));
-      CHK(cudaMemset(info.recvBuf, s_fillValue, nBytes - obytes));
-      CHK(cudaMemset(info.recvBuf + m_maxElems, s_oobValue, obytes));
+      CHK(cudaMemsetAsync(info.sendBuf, s_fillValue ^ 0xFF, nBytes, info.streams[0]));
+      CHK(cudaMemsetAsync(info.recvBuf, s_fillValue, nBytes, info.streams[0]));
 
-      std::vector< T > refBuf(m_maxElems);
-#if VERIFY_DATA
-      for(size_t i = 0; i < m_maxElems; i++) {
-        refBuf[i] = getElement(info.gpuId, i);
-      }
-#else
-      std::fill(refBuf.begin(), refBuf.end(), T(id));
-#endif
-      CHK(cudaMemcpyAsync(info.sendBuf, refBuf.data(), nBytes, cudaMemcpyHostToDevice,
-            info.streams[0]));
 #if !USE_CUSTOM_QCCL
       CHKNCCL(ncclCommInitRank(&info.comm, m_nGpus, m_ncclId, id));
 #endif
     }); // runJob
-    initExtraPeers();
+    init_extra_peers();
     CHK(cudaDeviceSynchronize());
   }
 
-  void verify(int id) {
+template < class T >
+void GpuComm<T>::fill_verify_data(int id) {
+
+    size_t obytes = s_redzoneElems*sizeof(T),
+           nBytes = m_curElems*sizeof(T);
+    auto& info = m_infos[id];
+    CHK(cudaSetDevice(info.gpuId));
+
+    CHK(cudaMemsetAsync(info.sendBuf, s_fillValue ^ 0xFF, nBytes, info.streams[0]));
+    CHK(cudaMemsetAsync(info.sendBuf + m_curElems, s_oobValue ^ 0xFF, obytes, info.streams[0]));
+    CHK(cudaMemsetAsync(info.recvBuf, s_fillValue, nBytes, info.streams[0]));
+    CHK(cudaMemsetAsync(info.recvBuf + m_curElems, s_oobValue, obytes, info.streams[0]));
+
+    std::vector< T > refBuf(m_curElems);
+#if VERIFY_DATA
+    for(size_t i = 0; i < m_curElems; i++) {
+      refBuf[i] = getElement(info.gpuId, i);
+    }
+#else
+    std::fill(refBuf.begin(), refBuf.end(), T(id));
+#endif
+    CHK(cudaMemcpyAsync(info.sendBuf, refBuf.data(), nBytes, cudaMemcpyHostToDevice,
+            info.streams[0]));
+  }
+
+template < class T >
+void GpuComm<T>::verify(int id) {
     std::lock_guard _(m_verifyMtx);
     auto sz = m_curElems + s_redzoneElems;
     if(m_hostBuf.size() < sz) {
@@ -352,7 +205,7 @@ public:
       auto truth = getElement(t, j);
       if(dst[j] != truth) {
         //ThrowError<>("%d: verify failed truth: %f gpu: %f", j, truth, dst[j]);
-        PRINTZ("%X: verify failed truth: %f gpu: %f", j, truth, dst[j]);
+        PRINTZ("0x%X/%d: verify failed truth: %u gpu: %u", j, j, truth, dst[j]);
         if(num++ >= 5)
           break;
       }
@@ -367,7 +220,8 @@ public:
     }
   }
 
-  void run_single_gpu(int id, int stage) 
+template < class T >
+void GpuComm<T>::run_single_gpu(int id, int stage) 
   {
     auto& info = m_infos[id];
     const auto& V = stage == 0 ? m_stageA[id] : m_stageB[id];
@@ -413,12 +267,18 @@ public:
 #endif // USE_CUSTOM_QCCL
   }
 
-  void run(size_t numElems, int numIters, bool measureTime = false, bool verifyData = false) {
+template < class T >
+void GpuComm<T>::run(size_t numElems, int numIters, bool measureTime, bool verifyData) {
 
     m_measureTime = measureTime;
     m_curElems = numElems;
     if(m_curElems > m_maxElems) {
        ThrowError< >("numElems must be <= m_maxElems");
+    }
+    if(verifyData) {
+      m_pool.runJob([&,this](int id) {
+        fill_verify_data(id);
+      });
     }
 
     m_offsets.resize(s_nExtraPeers + 1);
@@ -443,7 +303,8 @@ public:
     });
   }
 
-  void run_thread(int id, int numIters, bool verifyData) 
+template < class T >
+void GpuComm<T>::run_thread(int id, int numIters, bool verifyData) 
   {
     m_barrier.wait(); // wait all threads to arrive here before starting timing
     auto& info = m_infos[id];
@@ -483,14 +344,13 @@ public:
       verify(id);
     }
   }
-}; // struct GpuComm
 
 template < class T >
 void runRCCLTest(size_t elemsMin, size_t elemsMax)
 {
   int nGpus = 0, nwarmups = 5, niters = 10;
   CHK(hipGetDeviceCount(&nGpus));
-  nGpus = 2;
+  // nGpus = 2;
   VLOG("Num devices: " << nGpus << "; max data size: " << (double)(elemsMax*sizeof(T))/(1024*1024) << 
         " Mb; neighbour exchange with "
 #if USE_CUSTOM_QCCL
@@ -542,8 +402,8 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
 int main() try 
 {
   DeviceInit(0);
-  size_t sMin = 9289728/4, sMax = 9289728*8;
-  //size_t sMin = 1011*111, sMax = sMin;
+  size_t sMin = 2322432, sMax = 9289728*8;
+  // size_t sMin = 1011*111, sMax = sMin;
   runRCCLTest<uint32_t>(sMin, sMax);
 }
 catch(std::exception& ex) {

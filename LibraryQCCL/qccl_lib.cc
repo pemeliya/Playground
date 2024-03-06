@@ -317,27 +317,38 @@ __forceinline__ __device__ void setupSendPtrs(uint32_t ltid) {
   }
 }
 
-template < uint32_t BlockSz, uint32_t NumRegs, typename Word >
+template < typename Word, uint32_t BlockSz, uint32_t NumRegs, 
+        bool UseOuterLoop, bool Check >
 __forceinline__ __device__ 
-void copyMainLoop(uint32_t tid, const uint32_t niters, 
-      Word (&regs)[NumRegs], const Word *srcBuf, Word *targetBuf) {
+void copyMainLoop(uint32_t ofs, const uint32_t niters, const uint32_t nwords) {
 
-  // NOTe this version works if the number of bytes is divisible by 16!
-  for(uint32_t ofs = tid*2, s = 0; s < niters; s++) {
+  auto srcBuf = (const Word *)s_workInfo.sendItem.dataBuf;
+  auto targetBuf = (Word *)s_workInfo.targetBuf;
+
+  Word regs[NumRegs];
+  for(uint32_t s = 0; s < niters; s++) {
     auto src_ofs = ofs;
 #pragma unroll
     for(uint32_t i = 0; i < NumRegs/2; i++, src_ofs += BlockSz*2) {
-      regs[2*i] = LOAD(srcBuf + src_ofs);
-      regs[2*i + 1] = LOAD(srcBuf + src_ofs + 1);
+      if(!Check || src_ofs < nwords)
+        regs[2*i] = LOAD(srcBuf + src_ofs);
+      if(!Check || src_ofs + 1 < nwords)
+        regs[2*i + 1] = LOAD(srcBuf + src_ofs + 1);
     }
 #pragma unroll
     for(uint32_t i = 0; i < NumRegs/2; i++, ofs += BlockSz*2) {
-      STORE(regs[2*i], targetBuf + ofs);
-      STORE(regs[2*i + 1], targetBuf + ofs + 1);
+      if(!Check || ofs < nwords)
+        STORE(regs[2*i], targetBuf + ofs);
+      if(!Check || ofs + 1 < nwords)
+        STORE(regs[2*i + 1], targetBuf + ofs + 1);
     }
+    if(!UseOuterLoop) break;
   } // for ofs
   if(s_workInfo.recvItem.peer == 0) {
-   // gprint("%d: ofs left: %d -- %d", tid, ofs, s);
+    // uint32_t tid = threadIdx.x;
+    // int diff = s_workInfo.sendItem.size - ofs*sizeof(Word);
+    // gprint("%d: ofs: %d byteOfs: %d diff: %d", tid, ofs, ofs*sizeof(Word), 
+    //       diff);
   }
 }
 
@@ -367,31 +378,47 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
   __syncthreads();
 
   using Word = uint64_t;
-  auto srcBuf = (const Word *)s_workInfo.sendItem.dataBuf;
   const uint32_t bytes = s_workInfo.sendItem.size, 
-                 nwords = bytes / sizeof(Word);
+                 nwords = bytes / sizeof(Word),
+                 niters = nwords / (BlockSz * NumRegs);
 
-  auto targetBuf = (Word *)s_workInfo.targetBuf;
-  Word regs[NumRegs]; 
+  copyMainLoop< Word, BlockSz, NumRegs, true, false >
+                        (tid*2, niters, 0);
 
-  if(tid == 0) {
-      uint32_t nFullIters = nwords / (BlockSz*NumRegs),
-              bytesPerIter = BlockSz*NumRegs*sizeof(Word),
-              bytesLeft = bytes - nFullIters*bytesPerIter;
-      gprint("nwords: %d; bytes: %d mod16: %d nFullIters: %d "
-             "bytesPerIter: %d bytesLeft: %d", 
-            nwords, bytes, bytes%16, nFullIters, bytesPerIter, bytesLeft);
+  if(1)
+  {
+    constexpr uint32_t bytesPerIter = BlockSz*NumRegs*sizeof(Word);
+    const uint32_t bytesLeft = bytes - niters*bytesPerIter,
+                   wordsLeft = bytesLeft / sizeof(uint32_t),
+                   nwords32 = bytes / sizeof(uint32_t);
+
+    if(wordsLeft >= bytesPerIter/2) {
+      // do one full iteration with reduced size
+    }
+
+    if(tid == 0) {
+      gprint("nwords: %d; bytes: %d mod16: %d niters: %d "
+             "bytesPerIter: %d bytesLeft: %d wordsLeft: %d ll: %d", 
+            nwords, bytes, bytes%16, niters, bytesPerIter, 
+            bytesLeft, wordsLeft, nwords32);
+    }
+    // we are left with at most BlockSz*NumRegs*sizeof(Word)/sizeof(uint32_t)
+    // 32-bit words to process: 512*16*2 = 16384 words at most
+    // nbytes divisible by 4 !!
+    // or if we double the number of 32-bit regs => no need for outer loop ??
+    auto ofs = tid*2 + niters*bytesPerIter/sizeof(uint32_t),
+         src_ofs = ofs;
+    copyMainLoop< uint32_t, BlockSz, NumRegs*2, false, true >
+                          (ofs, 1, nwords32);
   }
-  const uint32_t niters = nwords / (BlockSz * NumRegs);
-  copyMainLoop< BlockSz, NumRegs >(tid, niters, regs, srcBuf, targetBuf);
 
-  __syncthreads();
-  if(tid == 0) {
-    auto bb = (uint32_t *)targetBuf;
-    uint32_t ww = bytes / 4;
-    gprint("peer: %d data %d %d %d %d", 
-        s_workInfo.recvItem.peer, bb[ww-2], bb[ww-1], bb[ww], bb[ww+1]);
-  }
+  // __syncthreads();
+  // if(tid == 0) {
+  //   auto bb = (uint32_t *)s_workInfo.targetBuf;
+  //   uint32_t ww = bytes / 4;
+  //   gprint("peer: %d data %d %d %d %d", 
+  //       s_workInfo.recvItem.peer, bb[ww-2], bb[ww-1], bb[ww], bb[ww+1]);
+  // }
 
   __threadfence_system(); // TODO check if it's correct
 

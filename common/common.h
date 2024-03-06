@@ -25,6 +25,7 @@
 #define cudaMemcpyAsync hipMemcpyAsync
 #define cudaMemcpyPeerAsync hipMemcpyPeerAsync
 #define cudaMemset hipMemset
+#define cudaMemsetAsync hipMemsetAsync
 #define cudaHostAlloc hipHostMalloc
 #define cudaFreeHost hipHostFree
 #define cudaMemcpyHostToDevice hipMemcpyHostToDevice
