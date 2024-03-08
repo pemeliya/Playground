@@ -58,9 +58,7 @@ template < class T >
 GpuComm<T>::~GpuComm() {
     for(auto& info : m_infos) {
       (void)cudaSetDevice(info.gpuId);
-      for(auto& s : info.streams) {
-        (void)cudaStreamDestroy(s);
-      }
+      (void)cudaStreamDestroy(info.stream);
       (void)cudaFree(info.sendBuf);
 #if !USE_CUSTOM_QCCL
       (void)ncclCommDestroy(info.comm);
@@ -147,14 +145,10 @@ void GpuComm<T>::init()
                   // hipMallocSignalMemory;
       CHK(hipExtMallocWithFlags((void **)&info.sendBuf, nBytes*2, flags));
       info.recvBuf = info.sendBuf + m_maxElems + s_redzoneElems;
+      CHK(cudaStreamCreateWithFlags(&info.stream, cudaStreamNonBlocking));
 
-      info.streams.resize(s_nExtraPeers + 1);
-      for(auto& s : info.streams) {
-        CHK(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking));
-      }
-
-      CHK(cudaMemsetAsync(info.sendBuf, s_fillValue ^ 0xFF, nBytes, info.streams[0]));
-      CHK(cudaMemsetAsync(info.recvBuf, s_fillValue, nBytes, info.streams[0]));
+      CHK(cudaMemsetAsync(info.sendBuf, s_fillValue ^ 0xFF, nBytes, info.stream));
+      CHK(cudaMemsetAsync(info.recvBuf, s_fillValue, nBytes, info.stream));
 
 #if !USE_CUSTOM_QCCL
       CHKNCCL(ncclCommInitRank(&info.comm, m_nGpus, m_ncclId, id));
@@ -172,10 +166,10 @@ void GpuComm<T>::fill_verify_data(int id) {
     auto& info = m_infos[id];
     CHK(cudaSetDevice(info.gpuId));
 
-    CHK(cudaMemsetAsync(info.sendBuf, s_fillValue ^ 0xFF, nBytes, info.streams[0]));
-    CHK(cudaMemsetAsync(info.sendBuf + m_curElems, s_oobValue ^ 0xFF, obytes, info.streams[0]));
-    CHK(cudaMemsetAsync(info.recvBuf, s_fillValue, nBytes, info.streams[0]));
-    CHK(cudaMemsetAsync(info.recvBuf + m_curElems, s_oobValue, obytes, info.streams[0]));
+    CHK(cudaMemsetAsync(info.sendBuf, s_fillValue ^ 0xFF, nBytes, info.stream));
+    CHK(cudaMemsetAsync(info.sendBuf + m_curElems, s_oobValue ^ 0xFF, obytes, info.stream));
+    CHK(cudaMemsetAsync(info.recvBuf, s_fillValue, nBytes, info.stream));
+    CHK(cudaMemsetAsync(info.recvBuf + m_curElems, s_oobValue, obytes, info.stream));
 
     std::vector< T > refBuf(m_curElems);
 #if VERIFY_DATA
@@ -186,7 +180,7 @@ void GpuComm<T>::fill_verify_data(int id) {
     std::fill(refBuf.begin(), refBuf.end(), T(id));
 #endif
     CHK(cudaMemcpyAsync(info.sendBuf, refBuf.data(), nBytes, cudaMemcpyHostToDevice,
-            info.streams[0]));
+            info.stream));
   }
 
 template < class T >
@@ -253,7 +247,7 @@ void GpuComm<T>::run_single_gpu(int id, int stage)
       CHKQCCL(qcclGatewaySend(id, 1, 0, sz1, sz2));
     }
 #endif
-    CHKQCCL(qcclRun(id, info.streams[0]));
+    CHKQCCL(qcclRun(id, info.stream));
 }
 #else // !USE_CUSTOM_QCCL
 
@@ -273,22 +267,22 @@ void GpuComm<T>::run_single_gpu(int id, int stage)
       for(int i = 0; i <= s_nExtraPeers; i++) {
         int sendP = V[i].out, recvP = V[i].in;
         CHKNCCL(ncclSend(info.sendBuf + m_offsets[i], 
-              m_sizes[i], type, sendP, info.comm, info.streams[0]));
+              m_sizes[i], type, sendP, info.comm, info.stream));
         CHKNCCL(ncclRecv(info.recvBuf + m_offsets[i], 
-              m_sizes[i], type, recvP, info.comm, info.streams[0]));
+              m_sizes[i], type, recvP, info.comm, info.stream));
       }
     } else {
       // std::lock_guard _(m_verifyMtx);
       // NOTE: you screw up send buffer here => hence verify iter must be the 1st one !!!
       for(int i = 1; i <= s_nExtraPeers; i++) {
         CHK(cudaMemcpyAsync(info.sendBuf + m_offsets[i], info.recvBuf + m_offsets[i],
-            m_sizes[i]*sizeof(T), cudaMemcpyDeviceToDevice, info.streams[0]));
+            m_sizes[i]*sizeof(T), cudaMemcpyDeviceToDevice, info.stream));
 
         int sendP = V[i-1].out, recvP = V[i-1].in;
         CHKNCCL(ncclSend(info.sendBuf + m_offsets[i], 
-               m_sizes[i], type, sendP, info.comm, info.streams[0]));
+               m_sizes[i], type, sendP, info.comm, info.stream));
         CHKNCCL(ncclRecv(info.recvBuf + m_offsets[i], 
-               m_sizes[i], type, recvP, info.comm, info.streams[0]));
+               m_sizes[i], type, recvP, info.comm, info.stream));
       }
     }
     CHKNCCL(ncclGroupEnd());
@@ -339,16 +333,16 @@ void GpuComm<T>::run_thread(int id, int numIters, bool verifyData)
 
     CPU_BEGIN_TIMING(T);
     for(int i = 0; i < numIters; i++) {
+      VLOG("\n============================ " << m_curElems << " =============================\n");
       run_single_gpu(id, 0);
-      for(auto& s : info.streams) {
-        CHK(cudaStreamSynchronize(s));
-      }
+      CHK(cudaStreamSynchronize(info.stream));
+      //std::this_thread::sleep_for(std::chrono::milliseconds(100));
 #if !USE_CUSTOM_QCCL
       //m_barrier.wait(); // wait all threads to arrive here before starting timing
-      run_single_gpu(id, 1);
-      for(auto& s : info.streams) {
-        CHK(cudaStreamSynchronize(s));
-      }
+      // run_single_gpu(id, 1);
+      // for(auto& s : info.streams) {
+      //   CHK(cudaStreamSynchronize(s));
+      // }
 #endif      
     } // for
 
@@ -393,7 +387,7 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
 #if VERIFY_DATA
   obj.run(elemsMin, 1, false, true); // first run to verify data
 #endif
-  return;
+  // return;
 
   obj.run(elemsMax, (nwarmups+1)/2);
   obj.run(elemsMin, nwarmups/2);
@@ -405,14 +399,6 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
   RocProfilerSession sess;
   sess.start();
 //    obj.run(elemsMin, 1);
-//  cudaSetDevice(0);
-//   hipLaunchKernelGGL(kernelD, dim3(1), dim3(1), 0, 0);
-
- // cudaSetDevice(0);
-  // hipDeviceProp_t devProp;
-  // hipGetDeviceProperties(&devProp, 0);
-  // hipMalloc((void**)&gpuMem, zz.size());
-  // hipMemcpy(gpuMem, zz.data(), zz.size(), cudaMemcpyHostToDevice);
   sess.stop();
   (void)hipFree(gpuMem);
   }
@@ -430,8 +416,8 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
 int main() try 
 {
   DeviceInit(0);
-  // size_t sMin = 2322432, sMax = 9289728*8;
-   size_t sMin = 1011*111, sMax = sMin;
+  size_t sMin = 2322432, sMax = 9289728*8;
+  //size_t sMin = 1011*111, sMax = sMin;
   runRCCLTest<uint32_t>(sMin, sMax);
 }
 catch(std::exception& ex) {

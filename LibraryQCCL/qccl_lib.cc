@@ -13,7 +13,7 @@
 #include "common/threading.hpp"
 #include "common/example_utils.hpp"
 
-#if 1
+#if 0
 #define gprint(fmt, ...) printf(fmt"\n", ##__VA_ARGS__)
 #else
 #define gprint(fmt, ...)
@@ -194,9 +194,10 @@ public:
     if(ID >= m_infos.size()) return QCCL_Result::InvalidParams;
     auto& info = m_infos[ID];
 
+    static int ii = 111; ii++;
     // here we are receiving from 'peerStart' and forwarding to 'peerEnd'
     auto& w = info.workItems.emplace_back();
-    w.ID = ID;
+    w.ID = ID + ii;
     w.nPeers = 2,
     w.dataOfs = dataOfs,
     // exchange buf is always on the "other" side for gateway nodes
@@ -288,6 +289,8 @@ __forceinline__ __device__ void setupInPtrs(void *targetBuf) {
 
   // we provide the sender our incoming buffer
   void *volatile *slot = s_workInfo.incoming.exchangeBuf;
+  
+  //! NOTE hangs here because we reset ready flag too fast (or too late)
   *(uint32_t *)(slot + SReadyFlag) = 0; // reset 'receive complete' flag
 
   // Wait for consumer to consume previous value before trampling it.
@@ -300,8 +303,8 @@ __forceinline__ __device__ void setupInPtrs(void *targetBuf) {
   // TODO: maybe do this in another warp ??
   // we also publish our own data buf (sendBuf)
   slot[SSourceBuf] = (void *)(s_workInfo.outgoing.sourceBuf);
-  gprint("%d / %p: Sent target buffer: %p to send peer %d", 
-          s_workInfo.ID, slot, targetBuf, s_workInfo.incoming.peer);
+  // gprint("%d / %p: Sent target buffer: %p to send peer %d", 
+  //         s_workInfo.ID, slot, targetBuf, s_workInfo.incoming.peer);
 }
 
 __forceinline__ __device__ void setupGatewayPtrs() {
@@ -310,8 +313,8 @@ __forceinline__ __device__ void setupGatewayPtrs() {
   // forward its data to the outgoing peer
   auto& item = s_workInfo.incoming;
   void *volatile *slot = item.exchangeBuf + SSourceBuf;
-  gprint("%d / %p: Starting receive GW input buf",
-      s_workInfo.ID, slot);
+  // gprint("%d / %p: Starting receive GW input buf",
+  //     s_workInfo.ID, slot);
 
   // asm volatile("global_load_dword %0, %1, off" : "=v"(c0) : "v"(slot));
   void *ptr;
@@ -331,8 +334,7 @@ __forceinline__ __device__ void setupOutPtrs() {
 
   auto& item = s_workInfo.outgoing;
   void *volatile *slot = item.exchangeBuf;
-  gprint("%d / %p: Starting receive target buf",
-      s_workInfo.ID, slot);
+  gprint("%d / %p: Starting receive target buf", s_workInfo.ID, slot);
 
   void *ptr;
   while (true) {
@@ -433,9 +435,9 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
 
   if(tid == 0) {
     resetBufferPtrs(); // when spinning is done, we reset buffer pointers
-    gprint("============= %d: sourceBuf: %p, targetBuf: %p isGateway: %d", 
-      s_workInfo.ID, s_workInfo.outgoing.sourceBuf,
-      s_workInfo.incoming.targetBuf, isGateway);
+    // gprint("============= %d: sourceBuf: %p, targetBuf: %p isGateway: %d", 
+    //   s_workInfo.ID, s_workInfo.outgoing.sourceBuf,
+    //   s_workInfo.incoming.targetBuf, isGateway);
   }
   //if(isGateway) // HACK we let gateways to do all job
   //  return;
@@ -471,10 +473,10 @@ Data size: 283.50 Mb; time elapsed: 8.474 ms, bandwidth: 35.082 Gb/s
     }
 
     if(tid == 0) {
-      gprint("nwords: %d; bytes: %d mod16: %d niters: %d "
-             "bytesPerIter: %d bytesLeft: %d wordsLeft: %d ll: %d", 
-            nwords, bytes, bytes%16, niters, bytesPerIter, 
-            bytesLeft, wordsLeft, nwords32);
+      // gprint("nwords: %d; bytes: %d mod16: %d niters: %d "
+      //        "bytesPerIter: %d bytesLeft: %d wordsLeft: %d ll: %d", 
+      //       nwords, bytes, bytes%16, niters, bytesPerIter, 
+      //       bytesLeft, wordsLeft, nwords32);
     }
     // we are left with at most BlockSz*NumRegs*sizeof(Word)/sizeof(uint32_t)
     // 32-bit words to process: 512*16*2 = 16384 words at most
@@ -486,19 +488,37 @@ Data size: 283.50 Mb; time elapsed: 8.474 ms, bandwidth: 35.082 Gb/s
   __threadfence_system(); // TODO check if it's correct
 
   // NOTE: it could be that some channel is only sender or only receiver ??
+  
+  // NOTE: we should set 'done' flag only then when all blocks have 
+  // successfully written to the destination
+  
+  // sender (outgoing) increments 'ready' flag
+  // receiver (incoming) waits for ready flag to be set properly
+
+  // loop {
+    
+  // }
+  // receiver should wait until all senders increment its 'ready flag'
 
   constexpr uint32_t s_flagVal = 0xDDDD;
   if(tid == 0) {
     void *volatile *sendSlot = s_workInfo.outgoing.exchangeBuf;
     auto sendDone = (volatile uint32_t *)(sendSlot + SReadyFlag);
     sendDone[0] = s_flagVal; //  __atomic_store_n(send_done, 1, __ATOMIC_SEQ_CST);
+    
+    auto sendCounter = (volatile uint32_t *)(sendSlot + SReadyFlagCounter);
+    atomicAdd((uint32_t *)sendCounter, 1);
+
     //__atomic_store_n(sendSlot, 0, __ATOMIC_RELAXED);
   } else if(tid == warpSize) {
-    auto recvDone = (volatile uint32_t *)
-        (s_workInfo.incoming.exchangeBuf + SReadyFlag);
-    gprint("Receiver waiting peer: %d", s_workInfo.outgoing.peer);
+    void *volatile *recvSlot = s_workInfo.outgoing.exchangeBuf;
+    auto recvDone = (volatile uint32_t *)(recvSlot + SReadyFlag);
+    auto recvCounter = (volatile uint32_t *)(recvSlot + SReadyFlagCounter);
+    gprint("%d: Receiver waiting peer counter: %d", s_workInfo.ID, recvCounter[0]+1);
+
+    // NOTE: this hangs on receive done !!!
     while(atomicAdd((uint32_t *)recvDone, 0u) != s_flagVal) {}
-    gprint("Waiting done.. %d", s_workInfo.outgoing.peer);
+    gprint("%d: Waiting done", s_workInfo.ID);
   }
 }
 

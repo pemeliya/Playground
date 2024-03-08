@@ -61,7 +61,7 @@ class GpuComm {
 
   struct ThreadInfo {
     int gpuId;            // gpu ID assigned to this thread
-    std::vector< cudaStream_t > streams; // associated streams
+    cudaStream_t stream; // associated streams
     T *sendBuf, *recvBuf; // send and receive buffers
 #if !USE_CUSTOM_QCCL
     ncclComm_t comm;      // NCCL handle
