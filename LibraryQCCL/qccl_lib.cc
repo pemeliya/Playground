@@ -19,6 +19,8 @@
 #define gprint(fmt, ...)
 #endif
 
+#define GLOBAL __attribute__((address_space(1)))
+
 // NOTE: if data size is small, maybe makes sense to use just normal load/store?
 #if 0
 #define LOAD(addr) __builtin_nontemporal_load(addr)
@@ -38,36 +40,38 @@
 enum SlotInfo {
   STargetBuf = 0,
   SSourceBuf,
-  SPtrExchangeCounter,
+  SBufsReceivedCounter,
   SReadyFlag,
   SReadyFlagCounter,
   STotalSlots,
 };
 
-struct SendWorkItem {
-  uint32_t peer;      // send/recv peer
+struct OutgoingWorkItem { // outgoing/send work item (what this node sends out)
+  uint32_t peer;      // send peer
   uint32_t size;      // buffer size in bytes (limited by 4GB!)
   void **exchangeBuf; // shared buffer for exchanging pointers between GPUs:
                       // this should be set accordingly for each p2p channel (pair of GPUs)
                       // It has two entries: one for ptr exchange and one for end-of-transfer flag
-  void *dataBuf;      // send/recv buffer 
+  uint8_t *sourceBuf; // source (send) buffer 
 };
 
-struct RecvWorkItem {
-  uint32_t peer;      // send/recv peer
-  uint32_t role;      // role: used to distinguish between normal and gateway nodes
+struct IncomingWorkItem { // incoming/recv work item (place where to receive the data)
+  uint32_t peer;      // recv peer
+  uint32_t size;      // buffer size in bytes (limited by 4GB!)
   void **exchangeBuf; // shared buffer for exchanging pointers between GPUs:
                       // this should be set accordingly for each p2p channel (pair of GPUs)
                       // It has two entries: one for ptr exchange and one for end-of-transfer flag
-  void *dataBuf;      // send/recv buffer 
+  uint8_t *targetBuf; // target (recv) buffer 
 };
 
 struct WorkInfo
 {
   uint32_t ID;        // my own ID
-  RecvWorkItem recv;
-  SendWorkItem send;
-  void *targetBuf;    // target buffer address obtained from the receiver
+  uint32_t nPeers;    // this should be the number of peers connected to a given 
+                      // exchange buffer
+  uint32_t dataOfs;   // data offset usually only set for gateway nodes
+  IncomingWorkItem incoming;
+  OutgoingWorkItem outgoing;
 };
 
 static_assert(sizeof(WorkInfo) % sizeof(uint64_t) == 0, 
@@ -142,14 +146,12 @@ public:
     return QCCL_Result::OK;
   }
 
-  QCCL_Result sendRecv(uint32_t ID, uint32_t recvPeer, void *recvBuf,
-        size_t recvSize, uint32_t sendPeer, void *sendBuf, size_t sendSize) {
+  QCCL_Result sendRecv(uint32_t ID, uint32_t recvPeer, void *targetBuf,
+        size_t recvSize, uint32_t sendPeer, void *sourceBuf, size_t sendSize) {
 
     // exchangeBuf[0] - initial pointer exchange 
     // exchangeBuf[1] - subscription count (how many gpus already read it)
     // exchangeBuf[2] - writing done flag.. (we also should have several ones)
-
-    VLOG(ID << ": sendRecv recvPeer: " << recvPeer << " -- sendPeer "  << sendPeer);
 
     if(!m_initialized) return QCCL_Result::NotInitialized;
     if(ID >= m_infos.size()) return QCCL_Result::InvalidParams;
@@ -157,23 +159,24 @@ public:
     // NOTE: exchange pointers are always allocated on the receiver side!!
     auto& w = info.workItems.emplace_back();
     w.ID = ID;
-    w.recv = { // whom we are receiving from
+    w.nPeers = 2, // usually we know how many peers are there
+    w.dataOfs = 0,
+    w.incoming = { // whom we are receiving from
           .peer = recvPeer,
-          .role = 0,
+          .size = (uint32_t)recvSize,
           // exchange buf on the receiver side: two entries per link
           // (we are receiver here): there we always publish our pointer
           .exchangeBuf = (void **)m_infos[ID].exchangeBuf,
-          .dataBuf = recvBuf,
+          .targetBuf = (uint8_t *)targetBuf,
     };
-    w.send = { // whom we are sending to
+    w.outgoing = { // whom we are sending to
           .peer = sendPeer,
           .size = (uint32_t)sendSize,
           // exchange buf on the receiver side: two entries per link
           // node 'sendPeer' is a receiver 
           .exchangeBuf = (void **)m_infos[sendPeer].exchangeBuf, 
-          .dataBuf = sendBuf,
+          .sourceBuf = (uint8_t *)sourceBuf,
     };
-    w.targetBuf = nullptr;
     return QCCL_Result::OK;
   }
 
@@ -194,21 +197,23 @@ public:
     // here we are receiving from 'peerStart' and forwarding to 'peerEnd'
     auto& w = info.workItems.emplace_back();
     w.ID = ID;
+    w.nPeers = 2,
+    w.dataOfs = dataOfs,
     // exchange buf is always on the "other" side for gateway nodes
     // we read pointers from peerStart and peerEnd
-    w.recv = { // whom we are receiving from
+    w.incoming = { // whom we are receiving from
           .peer = peerStart,
-          .role = 1,
+          .size = (uint32_t)dataSize,
           .exchangeBuf = (void **)m_infos[peerStart].exchangeBuf, 
-          .dataBuf = nullptr,
+          .targetBuf = nullptr,
     };
-    w.send = { // whom we are sending to
+    w.outgoing = { // whom we are sending to
           .peer = peerEnd,
           .size = (uint32_t)dataSize,
           // we are attaching to peerStart -- peerEnd communication link
           // since there must be a direct connection from peerStart to peerEnd too
           .exchangeBuf = (void **)m_infos[peerEnd].exchangeBuf, 
-          .dataBuf = nullptr,
+          .sourceBuf = nullptr,
     };
     return QCCL_Result::OK;
   }
@@ -224,9 +229,8 @@ public:
       allocWorkBuf(&info, info.numDevWorkItems * 3 / 2);
     }
     uint32_t nBlocks = info.workItems.size();
-    VLOG(ID << ": workItemSz: " << sizeof(WorkInfo) << " running with #blocks:" 
-           << nBlocks);
-
+    // VLOG(ID << ": workItemSz: " << sizeof(WorkInfo) << " running with #blocks:" 
+    //        << nBlocks);
     CHK(cudaMemcpyAsync(info.workBuf, info.workItems.data(), 
           sizeof(WorkInfo) * nBlocks, cudaMemcpyHostToDevice, stream));
     
@@ -258,17 +262,32 @@ protected:
 
 }; // GpuCommLib
 
-//Matrix< WorkInfo > p2pSend, p2pRecv;
-// ncclSend(a,b) -> set p2pSend(a,b) = sendBuf, sendSize (a sends to b) => a needs to get recv buffer from b
-// ncclRecv(b,a) -> set p2pRecv(b,a) = recvBuf, recvSize (b receives from a) => b needs give its recv buffer to a
-
 __shared__ WorkInfo s_workInfo;
 
-__forceinline__ __device__ void setupRecvPtrs() {
+// using index_t = int32_t;
+// typedef int32_t int32x4_t __attribute__((ext_vector_type(4)));
+// typedef float float2_t __attribute__((ext_vector_type(2)));
 
-  // we provide the sender our receive buffer
-  auto& item = s_workInfo.recv;
-  void *volatile *slot = item.exchangeBuf;
+// __device__ void __llvm_amdgcn_buffer_store_f32x2(float2_t vdata,
+//                                                  int32x4_t rsrc,
+//                                                  index_t vindex,
+//                                                  index_t offset,
+//                                                  bool glc,
+//                                                  bool slc) __asm("llvm.amdgcn.buffer.store.v2f32");
+
+extern uint __llvm_amdgcn_readfirstlane(uint) __asm("llvm.amdgcn.readfirstlane");
+
+// __device__ int32_t
+// llvm_amdgcn_raw_buffer_load_i32(int32x4_t srsrc,
+//                                 index_t voffset,
+//                                 index_t soffset,
+//                                 index_t glc_slc) __asm("llvm.amdgcn.raw.buffer.load.i32");
+
+
+__forceinline__ __device__ void setupInPtrs(void *targetBuf) {
+
+  // we provide the sender our incoming buffer
+  void *volatile *slot = s_workInfo.incoming.exchangeBuf;
   *(uint32_t *)(slot + SReadyFlag) = 0; // reset 'receive complete' flag
 
   // Wait for consumer to consume previous value before trampling it.
@@ -276,18 +295,41 @@ __forceinline__ __device__ void setupRecvPtrs() {
   // Encode pointer by XOR'ing against some address they definitely wouldn't send
   // since we want to allow them sending us nullptr while not colliding with
   // the empty slot value.
-  *slot = (void *)(reinterpret_cast<uintptr_t>(item.dataBuf) ^ 
+  *slot = (void *)(reinterpret_cast<uintptr_t>(targetBuf) ^ 
                    reinterpret_cast<uintptr_t>(slot));
   // TODO: maybe do this in another warp ??
   // we also publish our own data buf (sendBuf)
-  slot[SSourceBuf] = (void *)(s_workInfo.send.dataBuf);
+  slot[SSourceBuf] = (void *)(s_workInfo.outgoing.sourceBuf);
   gprint("%d / %p: Sent target buffer: %p to send peer %d", 
-          s_workInfo.ID, slot, item.dataBuf, s_workInfo.recv.peer);
+          s_workInfo.ID, slot, targetBuf, s_workInfo.incoming.peer);
 }
 
-__forceinline__ __device__ void setupSendPtrs() {
+__forceinline__ __device__ void setupGatewayPtrs() {
 
-  auto& item = s_workInfo.send;
+  // we read source buffer from incoming peer since we would like to 
+  // forward its data to the outgoing peer
+  auto& item = s_workInfo.incoming;
+  void *volatile *slot = item.exchangeBuf + SSourceBuf;
+  gprint("%d / %p: Starting receive GW input buf",
+      s_workInfo.ID, slot);
+
+  // asm volatile("global_load_dword %0, %1, off" : "=v"(c0) : "v"(slot));
+  void *ptr;
+  while (true) {
+    //global_atomic_add_u64((uint64_t *)slot, 0);
+    // __builtin_amdgcn_global_atomic_fadd_f64((double *)slot, 0);
+    ptr = (void *)atomicAdd((uint64_t *)slot, 0);
+    if (ptr != nullptr) break;
+  }
+  s_workInfo.outgoing.sourceBuf = (uint8_t *)(reinterpret_cast<uintptr_t>(ptr));
+  gprint("%d / %p: Received SRC buf: %p from peer %d", 
+            s_workInfo.ID, slot, s_workInfo.outgoing.sourceBuf, 
+                        s_workInfo.outgoing.peer);
+}
+
+__forceinline__ __device__ void setupOutPtrs() {
+
+  auto& item = s_workInfo.outgoing;
   void *volatile *slot = item.exchangeBuf;
   gprint("%d / %p: Starting receive target buf",
       s_workInfo.ID, slot);
@@ -297,27 +339,25 @@ __forceinline__ __device__ void setupSendPtrs() {
     ptr = (void *)atomicAdd((uint64_t *)slot, 0);
     if (ptr != nullptr) break;    
   }
-  s_workInfo.targetBuf = (void *)(reinterpret_cast<uintptr_t>(ptr) ^ 
-                                    reinterpret_cast<uintptr_t>(slot));
+
+  s_workInfo.incoming.targetBuf = (uint8_t *)(reinterpret_cast<uintptr_t>(ptr) ^ 
+                                           reinterpret_cast<uintptr_t>(slot));
   gprint("%d / %p: Received target buf: %p from recv peer %d", 
-            s_workInfo.ID, slot, s_workInfo.targetBuf, s_workInfo.send.peer);
+            s_workInfo.ID, slot, s_workInfo.incoming.targetBuf, 
+                                 s_workInfo.outgoing.peer);
 }
 
-__forceinline__ __device__ void setupGatewayPtrs() {
+__forceinline__ __device__ void resetBufferPtrs() 
+{
+  auto& item = s_workInfo.outgoing;
+  void *volatile *slot = item.exchangeBuf;
+  auto counter = (uint32_t *)(slot + SBufsReceivedCounter);
+  auto val = 1 + atomicAdd(counter, 1);
 
-  auto& item = s_workInfo.recv;
-  void *volatile *slot = item.exchangeBuf + SSourceBuf;
-  gprint("%d / %p: Starting receive GW input buf",
-      s_workInfo.ID, slot);
-
-  void *ptr;
-  while (true) {
-    ptr = (void *)atomicAdd((uint64_t *)slot, 0);
-    if (ptr != nullptr) break;    
+  if(val % s_workInfo.nPeers == 0) {
+    gprint("%d: resetting buffers val = %d if zero", s_workInfo.ID, val);
+    slot[STargetBuf] = nullptr;
   }
-  auto srcBuf = (void *)(reinterpret_cast<uintptr_t>(ptr));
-  gprint("%d / %p: Received SRC buf: %p from peer %d", 
-            s_workInfo.ID, slot, srcBuf, s_workInfo.send.peer);
 }
 
 template < typename Word, uint32_t BlockSz, uint32_t NumRegs, 
@@ -325,8 +365,9 @@ template < typename Word, uint32_t BlockSz, uint32_t NumRegs,
 __forceinline__ __device__ 
 void copyMainLoop(uint32_t ofs, const uint32_t niters, const uint32_t nwords) {
 
-  auto srcBuf = (const Word *)s_workInfo.send.dataBuf;
-  auto targetBuf = (Word *)s_workInfo.targetBuf;
+  const uint32_t dataOfs = s_workInfo.dataOfs;
+  auto srcBuf = (const Word GLOBAL *)(s_workInfo.outgoing.sourceBuf + dataOfs);
+  auto targetBuf = (Word GLOBAL *)(s_workInfo.incoming.targetBuf + dataOfs);
 
   Word regs[NumRegs];
   for(uint32_t s = 0; s < niters; s++) {
@@ -347,9 +388,9 @@ void copyMainLoop(uint32_t ofs, const uint32_t niters, const uint32_t nwords) {
     }
     if(!UseOuterLoop) break;
   } // for ofs
-  if(s_workInfo.recv.peer == 0) {
+  if(s_workInfo.incoming.peer == 0) {
     // uint32_t tid = threadIdx.x;
-    // int diff = s_workInfo.send.size - ofs*sizeof(Word);
+    // int diff = s_workInfo.outgoing.size - ofs*sizeof(Word);
     // gprint("%d: ofs: %d byteOfs: %d diff: %d", tid, ofs, ofs*sizeof(Word), 
     //       diff);
   }
@@ -365,41 +406,42 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
 
   uint32_t tid = threadIdx.x;
   if(tid < s_num) {
-    auto pblock = (uint64_t *)(gworkInfo + blockIdx.x);
+    auto pblock = (uint64_t*)(gworkInfo + blockIdx.x);
     auto d = pblock[tid];
     ((uint64_t *)&s_workInfo)[tid] = d;
   }
   __syncthreads();
+  // target buffer is going to be overwritten
+  auto targetBuf = s_workInfo.incoming.targetBuf;
+  // gateway node if both pointers are null
+  bool isGateway = targetBuf == nullptr && s_workInfo.outgoing.sourceBuf == nullptr;
 
-  bool isGateway = s_workInfo.recv.role == 1;
+  __syncthreads(); // need another sync here to avoid possible data race with another warp
 
   // we will use directWrite: that is, each sender writes data to receiver buffer directly
   // for that, receiver should provide sender the buffer address
   if(tid == 0) {
     if(!isGateway) {
-      setupRecvPtrs(); // share pointers from whom we are receiving
+      setupInPtrs(targetBuf); // share pointers from whom we are receiving
     } else {
       setupGatewayPtrs();
     }
   } else if(tid == warpSize) {
-    setupSendPtrs(); // obtain pointers to whom we are sending
+    setupOutPtrs(); // obtain pointers to whom we are sending
   }
-
-  if(isGateway) {
-    //s_workInfo.send.dataBuf = <source buffer>
-  }
-
   __syncthreads();
 
   if(tid == 0) {
-    gprint("============= %d: my target buffer: %p", s_workInfo.ID, s_workInfo.targetBuf);
+    resetBufferPtrs(); // when spinning is done, we reset buffer pointers
+    gprint("============= %d: sourceBuf: %p, targetBuf: %p isGateway: %d", 
+      s_workInfo.ID, s_workInfo.outgoing.sourceBuf,
+      s_workInfo.incoming.targetBuf, isGateway);
   }
-
-  if(isGateway)
-    return;
+  //if(isGateway) // HACK we let gateways to do all job
+  //  return;
 
   using Word = uint64_t;
-  const uint32_t bytes = s_workInfo.send.size, 
+  const uint32_t bytes = s_workInfo.outgoing.size, 
                  nwords = bytes / sizeof(Word),
                  niters = nwords / (BlockSz * NumRegs);
 /*
@@ -414,23 +456,10 @@ Data size: 100.91 Mb; time elapsed: 2.824 ms, bandwidth: 37.475 Gb/s
 Data size: 151.37 Mb; time elapsed: 4.226 ms, bandwidth: 37.562 Gb/s
 Data size: 227.06 Mb; time elapsed: 6.295 ms, bandwidth: 37.820 Gb/s
 Data size: 283.50 Mb; time elapsed: 8.474 ms, bandwidth: 35.082 Gb/s
-
-Speed with 32 regs / 512 threads
-Data size: 8.86 Mb; time elapsed: 0.309 ms, bandwidth: 30.089 Gb/s
-Data size: 13.29 Mb; time elapsed: 0.430 ms, bandwidth: 32.391 Gb/s
-Data size: 19.93 Mb; time elapsed: 0.615 ms, bandwidth: 34.005 Gb/s
-Data size: 29.90 Mb; time elapsed: 0.886 ms, bandwidth: 35.406 Gb/s
-Data size: 44.85 Mb; time elapsed: 1.309 ms, bandwidth: 35.930 Gb/s
-Data size: 67.28 Mb; time elapsed: 1.908 ms, bandwidth: 36.981 Gb/s
-Data size: 100.91 Mb; time elapsed: 2.831 ms, bandwidth: 37.374 Gb/s
-Data size: 151.37 Mb; time elapsed: 4.228 ms, bandwidth: 37.544 Gb/s
-Data size: 227.06 Mb; time elapsed: 6.300 ms, bandwidth: 37.793 Gb/s
-Data size: 283.50 Mb; time elapsed: 8.613 ms, bandwidth: 34.515 Gb/s
 */
   copyMainLoop< Word, BlockSz, NumRegs, true, false >
                          (tid*2, niters, 0);
 
-  if(1)
   {
     constexpr uint32_t bytesPerIter = BlockSz*NumRegs*sizeof(Word);
     const uint32_t bytesLeft = bytes - niters*bytesPerIter,
@@ -450,9 +479,7 @@ Data size: 283.50 Mb; time elapsed: 8.613 ms, bandwidth: 34.515 Gb/s
     // we are left with at most BlockSz*NumRegs*sizeof(Word)/sizeof(uint32_t)
     // 32-bit words to process: 512*16*2 = 16384 words at most
     // nbytes divisible by 4 !!
-    // or if we double the number of 32-bit regs => no need for outer loop ??
-    auto ofs = tid*2 + niters*bytesPerIter/sizeof(uint32_t),
-         src_ofs = ofs;
+    auto ofs = tid*2 + niters*bytesPerIter/sizeof(uint32_t);
     copyMainLoop< uint32_t, BlockSz, NumRegs*2, false, true >
                           (ofs, 1, nwords32);
   }
@@ -460,20 +487,18 @@ Data size: 283.50 Mb; time elapsed: 8.613 ms, bandwidth: 34.515 Gb/s
 
   // NOTE: it could be that some channel is only sender or only receiver ??
 
+  constexpr uint32_t s_flagVal = 0xDDDD;
   if(tid == 0) {
-    void *volatile *sendSlot = s_workInfo.send.exchangeBuf;
+    void *volatile *sendSlot = s_workInfo.outgoing.exchangeBuf;
     auto sendDone = (volatile uint32_t *)(sendSlot + SReadyFlag);
-    sendDone[0] = 11111; //  __atomic_store_n(send_done, 1, __ATOMIC_SEQ_CST);
+    sendDone[0] = s_flagVal; //  __atomic_store_n(send_done, 1, __ATOMIC_SEQ_CST);
     //__atomic_store_n(sendSlot, 0, __ATOMIC_RELAXED);
-    sendSlot[STargetBuf] = nullptr;
-    sendSlot[SSourceBuf] = nullptr; // cleanup for the next iteration
-
   } else if(tid == warpSize) {
     auto recvDone = (volatile uint32_t *)
-        (s_workInfo.recv.exchangeBuf + SReadyFlag);
-    gprint("Receiver waiting peer: %d", s_workInfo.send.peer);
-    while(atomicAdd((uint32_t *)recvDone, 0u) != 11111u);
-    gprint("Waiting done.. %d", s_workInfo.send.peer);
+        (s_workInfo.incoming.exchangeBuf + SReadyFlag);
+    gprint("Receiver waiting peer: %d", s_workInfo.outgoing.peer);
+    while(atomicAdd((uint32_t *)recvDone, 0u) != s_flagVal) {}
+    gprint("Waiting done.. %d", s_workInfo.outgoing.peer);
   }
 }
 
@@ -481,10 +506,10 @@ QCCL_Result qcclInit(uint32_t nGpus) {
   return GpuCommLib::i().init(nGpus);
 }
 
-QCCL_Result qcclSendRecv(uint32_t ID, uint32_t recvPeer, void *recvBuf,
-        size_t recvSize, uint32_t sendPeer, void *sendBuf, size_t sendSize) {
-  return GpuCommLib::i().sendRecv(ID, recvPeer, recvBuf,
-        recvSize, sendPeer, sendBuf, sendSize);
+QCCL_Result qcclSendRecv(uint32_t ID, uint32_t recvPeer, void *targetBuf,
+        size_t recvSize, uint32_t sendPeer, void *sourceBuf, size_t sendSize) {
+  return GpuCommLib::i().sendRecv(ID, recvPeer, targetBuf,
+        recvSize, sendPeer, sourceBuf, sendSize);
 }
 
 // register node ID as being a gateway for sending data from peerStart to peerEnd

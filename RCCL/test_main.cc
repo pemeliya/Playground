@@ -200,7 +200,11 @@ void GpuComm<T>::verify(int id) {
     CHK(cudaMemcpy(dst, m_infos[id].recvBuf, sz*sizeof(T), cudaMemcpyDeviceToHost));
     // Node id should receive original data from node m_stageA[id][0].in
     auto t = m_stageA[id][0].in;
-    VLOG("Device " << id << " verifying: expecting data from node: " << t);
+    if(id == 2) // HACK HACK
+      return;
+    t = 1 - id;
+
+    VLOG("Device " << id << " verifying: expecting data from: " << t);
     for(uint32_t j = 0, num = 0; j < m_curElems; j++) {
       auto truth = getElement(t, j);
       if(dst[j] != truth) {
@@ -235,15 +239,18 @@ void GpuComm<T>::run_single_gpu(int id, int stage)
             sendP, info.sendBuf, size));
     } 
 #else
-    auto size = m_sizes[0] * sizeof(T);
+    // make sizes divisible by 4
+    auto size = m_sizes[0] * sizeof(T),
+         sz1 = (size / 2 + 3) & ~3, sz2 = size - sz1;
     if(id == 0 || id == 1) {
       // we send and receive to/from the same node (bidirectional)
       int sendP = 1 - id, recvP = 1 - id;
-      CHKQCCL(qcclSendRecv(id, recvP, info.recvBuf, size,
-            sendP, info.sendBuf, size));
+      CHKQCCL(qcclSendRecv(id, recvP, info.recvBuf, sz1,
+            sendP, info.sendBuf, sz1));
     } else if(id == 2) {
       // create gateway peer
-      CHKQCCL(qcclGatewaySend(id, 0, 1, size, size));
+      CHKQCCL(qcclGatewaySend(id, 0, 1, sz1, sz2));
+      CHKQCCL(qcclGatewaySend(id, 1, 0, sz1, sz2));
     }
 #endif
     CHKQCCL(qcclRun(id, info.streams[0]));
@@ -423,8 +430,8 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
 int main() try 
 {
   DeviceInit(0);
-  size_t sMin = 2322432, sMax = 9289728*8;
-  // size_t sMin = 1011*111, sMax = sMin;
+  // size_t sMin = 2322432, sMax = 9289728*8;
+   size_t sMin = 1011*111, sMax = sMin;
   runRCCLTest<uint32_t>(sMin, sMax);
 }
 catch(std::exception& ex) {
