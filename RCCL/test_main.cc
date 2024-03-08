@@ -234,8 +234,9 @@ void GpuComm<T>::run_single_gpu(int id, int stage)
     } 
 #else
     // make sizes divisible by 4
-    auto size = m_sizes[0] * sizeof(T),
-         sz1 = (size / 2 + 3) & ~3, sz2 = size - sz1;
+    size_t size = m_sizes[0] * sizeof(T),
+         sz1 = (size * 2 / 3 + 3) & ~3, 
+         sz2 = (size - sz1);
     if(id == 0 || id == 1) {
       // we send and receive to/from the same node (bidirectional)
       int sendP = 1 - id, recvP = 1 - id;
@@ -333,7 +334,7 @@ void GpuComm<T>::run_thread(int id, int numIters, bool verifyData)
 
     CPU_BEGIN_TIMING(T);
     for(int i = 0; i < numIters; i++) {
-      VLOG("\n============================ " << m_curElems << " =============================\n");
+      //VLOG("\n============================ " << m_curElems << " =============================\n");
       run_single_gpu(id, 0);
       CHK(cudaStreamSynchronize(info.stream));
       //std::this_thread::sleep_for(std::chrono::milliseconds(100));
