@@ -193,20 +193,6 @@ __device__ FORCEINLINE void xswap(NT& a, NT& b) {
   a = b, b = c;
 }
 
-__device__ FORCEINLINE uint32_t gpuLaneId() {
-  uint32_t lane_id;
-#if !COMPILE_FOR_ROCM
-#if __clang__
-  return __nvvm_read_ptx_sreg_laneid();
-#else   // __clang__
-  asm("mov.u32 %0, %%laneid;" : "=r"(lane_id));
-#endif  // __clang__
-#else
-  lane_id = __lane_id();
-#endif
-  return lane_id;
-}
-
 // K - topk size
 // N - elements per thread
 template < class KT, uint32_t K >

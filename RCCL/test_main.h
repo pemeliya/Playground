@@ -56,9 +56,10 @@ constexpr static uint32_t s_bogus = 0xFFFFFFFFu; // to catch uninitialized entri
 void output_dot(const Matrix<Node>& stageA, const Matrix<Node>& stageB);
 std::vector< uint32_t > permute_op(uint32_t nGpus);
 
-template < class T >
-class GpuComm {
+struct GpuComm {
 
+  using T = uint32_t;
+public:  
   struct ThreadInfo {
     int gpuId;            // gpu ID assigned to this thread
     cudaStream_t stream; // associated streams
