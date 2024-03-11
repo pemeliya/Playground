@@ -41,8 +41,8 @@ Thread pool joined
 
 GpuComm::GpuComm(size_t nGpus, size_t maxElems) : m_nGpus(nGpus), m_maxElems(maxElems),
       m_curElems(maxElems), 
-      m_nExtraPeers(2), // if zero, all traffic is sent directly
-      m_splitFactor(0.5), // this much of traffic is sent to target GPUs directly
+      m_nExtraPeers(1), // if zero, all traffic is sent directly
+      m_splitFactor(0.99), // this much of traffic is sent to target GPUs directly
       m_infos(nGpus), m_barrier(nGpus), m_pool(nGpus),
       m_commGraph(nGpus, m_nExtraPeers + 1, Node{s_bogus,s_bogus}) 
 { 
@@ -167,28 +167,34 @@ void GpuComm::run_single_gpu(int id)
 {
   auto& info = m_infos[id];
   const auto& V = m_commGraph[id];
-
 #if 0
+  uint32_t numSubscribedPeers = 1 + m_nExtraPeers;
   for(int i = 0; i <= m_nExtraPeers; i++) {
-      int sendP = V[i].out, recvP = V[i].in;
+      int inP = V[i].in, outP = V[i].out;
       auto size = m_sizes[i] * sizeof(T);
-      CHKQCCL(qcclSendRecv(id, recvP, info.recvBuf, size,
-          sendP, info.sendBuf, size));
+      if(i == 0) {
+        CHKQCCL(qcclSendRecv(id, numSubscribedPeers, inP, info.recvBuf, size,
+            outP, info.sendBuf, size));
+      } else {
+        CHKQCCL(qcclGatewaySend(id, numSubscribedPeers, inP, outP, 
+              m_offsets[i], size));
+      }
   } 
 #else
+  uint32_t numSubscribedPeers = 2;
   // make sizes divisible by 4
-  size_t size = m_sizes[0] * sizeof(T),
+  size_t size = m_curElems * sizeof(T),
          sz1 = (size * 2 / 3 + 3) & ~3, 
          sz2 = (size - sz1);
   if(id == 0 || id == 1) {
     // we send and receive to/from the same node (bidirectional)
     int sendP = 1 - id, recvP = 1 - id;
-    CHKQCCL(qcclSendRecv(id, recvP, info.recvBuf, sz1,
+    CHKQCCL(qcclSendRecv(id, numSubscribedPeers, recvP, info.recvBuf, sz1,
           sendP, info.sendBuf, sz1));
   } else if(id == 2) {
     // create gateway peer
-    CHKQCCL(qcclGatewaySend(id, 0, 1, sz1, sz2));
-    CHKQCCL(qcclGatewaySend(id, 1, 0, sz1, sz2));
+    CHKQCCL(qcclGatewaySend(id, numSubscribedPeers, 0, 1, sz1, sz2));
+    CHKQCCL(qcclGatewaySend(id, numSubscribedPeers, 1, 0, sz1, sz2));
   }
 #endif
   CHKQCCL(qcclRun(id, info.stream));
@@ -240,10 +246,10 @@ void GpuComm::run(size_t numElems, int numIters, bool measureTime, bool verifyDa
     m_sizes[i] = step;
   }
   m_sizes[m_nExtraPeers] = m_curElems - m_offsets[m_nExtraPeers];
-  // for(uint32_t i = 0; i <= m_nExtraPeers; i++) {
-  //   PRINTZ("%d: ofs: %lX; size: %lX; sum: %lX", 
-  //         i, m_offsets[i], m_sizes[i], m_offsets[i] + m_sizes[i]);
-  // }
+  for(uint32_t i = 0; i <= m_nExtraPeers && verifyData; i++) {
+    PRINTZ("%d: ofs: %lX; size: %lX; sum: %lX", 
+          i, m_offsets[i], m_sizes[i], m_offsets[i] + m_sizes[i]);
+  }
   
   m_pool.runJob([&,this](int id) {
     run_thread(id, numIters, verifyData);
@@ -288,7 +294,7 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
 {
   int nGpus = 0, nwarmups = 5, niters = 10;
   CHK(hipGetDeviceCount(&nGpus));
-  nGpus = 4;
+  nGpus = 3;
   VLOG("Num devices: " << nGpus << "; max data size: " << 
       (double)(elemsMax*sizeof(GpuComm::T))/(1024*1024) << 
         " Mb; neighbour exchange with "
@@ -333,8 +339,8 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
 int main() try 
 {
   DeviceInit(0);
-  size_t sMin = 2322432, sMax = 9289728*8;
-  //size_t sMin = 1011*111, sMax = sMin;
+  //size_t sMin = 2322432, sMax = 9289728*8;
+  size_t sMin = 1011*111, sMax = sMin;
   runRCCLTest(sMin, sMax);
 }
 catch(std::exception& ex) {

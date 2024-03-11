@@ -146,8 +146,9 @@ public:
     return QCCL_Result::OK;
   }
 
-  QCCL_Result sendRecv(uint32_t ID, uint32_t recvPeer, void *targetBuf,
-        size_t recvSize, uint32_t sendPeer, void *sourceBuf, size_t sendSize) {
+  QCCL_Result sendRecv(uint32_t ID, uint32_t numSubscribedPeers, 
+        uint32_t inPeer, void *targetBuf, size_t inSize, 
+        uint32_t outPeer, void *sourceBuf, size_t outSize) {
 
     // exchangeBuf[0] - initial pointer exchange 
     // exchangeBuf[1] - subscription count (how many gpus already read it)
@@ -159,22 +160,22 @@ public:
     // NOTE: exchange pointers are always allocated on the receiver side!!
     auto& w = info.workItems.emplace_back();
     w.ID = ID;
-    w.nPeers = 2, // usually we know how many peers are there
+    w.nPeers = numSubscribedPeers, // usually we know how many peers are there
     w.dataOfs = 0,
     w.incoming = { // whom we are receiving from
-          .peer = recvPeer,
-          .size = (uint32_t)recvSize,
+          .peer = inPeer,
+          .size = (uint32_t)inSize,
           // exchange buf on the receiver side: two entries per link
           // (we are receiver here): there we always publish our pointer
           .exchangeBuf = (void **)m_infos[ID].exchangeBuf,
           .targetBuf = (uint8_t *)targetBuf,
     };
     w.outgoing = { // whom we are sending to
-          .peer = sendPeer,
-          .size = (uint32_t)sendSize,
+          .peer = outPeer,
+          .size = (uint32_t)outSize,
           // exchange buf on the receiver side: two entries per link
-          // node 'sendPeer' is a receiver 
-          .exchangeBuf = (void **)m_infos[sendPeer].exchangeBuf, 
+          // node 'outPeer' is a receiver 
+          .exchangeBuf = (void **)m_infos[outPeer].exchangeBuf, 
           .sourceBuf = (uint8_t *)sourceBuf,
     };
     return QCCL_Result::OK;
@@ -187,8 +188,9 @@ public:
   // to get write buffer from node 1, the gateway node '2' must connect 
   // to node's 1 exchange buffer with node 0
 
-  QCCL_Result gatewaySend(uint32_t ID, uint32_t peerStart, uint32_t peerEnd, 
-        size_t dataOfs, size_t dataSize) {
+  QCCL_Result gatewaySend(uint32_t ID, uint32_t numSubscribedPeers,
+         uint32_t peerStart, uint32_t peerEnd, 
+         size_t dataOfs, size_t dataSize) {
 
     if(!m_initialized) return QCCL_Result::NotInitialized;
     if(ID >= m_infos.size()) return QCCL_Result::InvalidParams;
@@ -198,7 +200,7 @@ public:
     // here we are receiving from 'peerStart' and forwarding to 'peerEnd'
     auto& w = info.workItems.emplace_back();
     w.ID = ID + ii;
-    w.nPeers = 2,
+    w.nPeers = numSubscribedPeers,
     w.dataOfs = dataOfs,
     // exchange buf is always on the "other" side for gateway nodes
     // we read pointers from peerStart and peerEnd
@@ -542,16 +544,19 @@ QCCL_Result qcclInit(uint32_t nGpus) {
   return GpuCommLib::i().init(nGpus);
 }
 
-QCCL_Result qcclSendRecv(uint32_t ID, uint32_t recvPeer, void *targetBuf,
-        size_t recvSize, uint32_t sendPeer, void *sourceBuf, size_t sendSize) {
-  return GpuCommLib::i().sendRecv(ID, recvPeer, targetBuf,
+QCCL_Result qcclSendRecv(uint32_t ID, uint32_t numSubscribedPeers, 
+        uint32_t recvPeer, void *targetBuf, size_t recvSize, 
+        uint32_t sendPeer, void *sourceBuf, size_t sendSize) {
+  return GpuCommLib::i().sendRecv(ID, numSubscribedPeers, recvPeer, targetBuf,
         recvSize, sendPeer, sourceBuf, sendSize);
 }
 
 // register node ID as being a gateway for sending data from peerStart to peerEnd
-QCCL_Result qcclGatewaySend(uint32_t ID, uint32_t peerStart, uint32_t peerEnd, 
+QCCL_Result qcclGatewaySend(uint32_t ID, uint32_t numSubscribedPeers, 
+        uint32_t peerStart, uint32_t peerEnd, 
         size_t dataOfs, size_t dataSize) {
-  return GpuCommLib::i().gatewaySend(ID, peerStart, peerEnd, dataOfs, dataSize);
+  return GpuCommLib::i().gatewaySend(ID, numSubscribedPeers, 
+          peerStart, peerEnd, dataOfs, dataSize);
 }
 
 QCCL_Result qcclRun(uint32_t ID, cudaStream_t stream) {
