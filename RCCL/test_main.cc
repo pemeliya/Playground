@@ -39,16 +39,14 @@ Thread pool joined
         __FILE__,__LINE__, ncclGetErrorString(res));     \
   }
 
-std::ostream& operator<<(std::ostream& ofs, const Node& n) {
-  return ofs << '(' << n.in << ',' << n.out << ')';
-}
-
 GpuComm::GpuComm(size_t nGpus, size_t maxElems) : m_nGpus(nGpus), m_maxElems(maxElems),
-      m_curElems(maxElems), m_infos(nGpus), m_barrier(nGpus), m_pool(nGpus),
-      m_stageA(nGpus, s_nExtraPeers+1, Node{s_bogus,s_bogus}), 
-      m_stageB(nGpus, s_nExtraPeers, Node{s_bogus,s_bogus})
+      m_curElems(maxElems), 
+      m_nExtraPeers(2), // if zero, all traffic is sent directly
+      m_splitFactor(0.5), // this much of traffic is sent to target GPUs directly
+      m_infos(nGpus), m_barrier(nGpus), m_pool(nGpus),
+      m_commGraph(nGpus, m_nExtraPeers + 1, Node{s_bogus,s_bogus}) 
 { 
-  if((s_nExtraPeers == 0 && s_splitFactor != 1.0) || s_nExtraPeers >= m_nGpus-1) {
+  if((m_nExtraPeers == 0 && m_splitFactor != 1.0) || m_nExtraPeers >= m_nGpus-1) {
     throw std::runtime_error("Wrong number of extra peers!");
   }
 }
@@ -62,53 +60,6 @@ GpuComm::~GpuComm() {
     (void)ncclCommDestroy(info.comm);
 #endif
     }
-}
-
-void GpuComm::init_extra_peers() {
-
-  auto permute = permute_op(m_nGpus);
-  for(uint32_t i = 0; i < m_nGpus; i++) {
-    //VLOG(i << " permute: " << permute[i]);
-    m_stageA[i][0].out = permute[i];  // gpu i sends to gpu permute[i]
-    m_stageA[permute[i]][0].in = i;   // gpu permute[i] receives from gpu i
-  }
-
-  // the # of incoming links and outgoing links (the target link is already counted)
-  std::vector< uint32_t > inA(m_nGpus, 1), outA(m_nGpus, 1);
-  for(uint32_t i = 0; i < m_nGpus; i++) {
-
-    auto t = m_stageA[i][0].out; // target node for GPU i
-    // iterate until all outgoing links for GPU i are filled
-    for(uint32_t jc = i + 1; jc <= i + m_nGpus && outA[i] <= s_nExtraPeers; jc++) {
-      uint32_t dj = jc - m_nGpus, j = (int)dj < 0 ? jc : dj;
-      // skip self, the target node, and nodes with too many extra peers
-      if(i == j || t == j || inA[j] > s_nExtraPeers) { 
-        continue;
-      }
-      auto z = outA[i]++;
-      m_stageA[i][z].out = j; // node i sends z-th piece to node j
-      m_stageA[j][z].in = i;  // node j receives z-th piece from node i
-      // node j now contains z-th piece from i to be forwarded to node t
-      m_stageB[j][z-1].out = t; // finally we want to send data to target
-      m_stageB[t][z-1].in = j;   // target receives this piece from j
-      inA[j]++;
-    }
-  }
-  for(uint32_t i = 0; i < m_nGpus; i++) { 
-    VLOG("GPU " << i << ": stageA: " << m_stageA.printRow(i));
-    VLOG("GPU " << i << ": stageB: " << m_stageB.printRow(i));
-  }
-  for(const auto& a : m_stageA) {
-    if(a.in == s_bogus || a.out == s_bogus) {
-      ThrowError<>("Uninitialized node for stageA!");
-    }
-  }
-  for(const auto& b : m_stageB) {
-    if(b.in == s_bogus || b.out == s_bogus) {
-      ThrowError<>("Uninitialized node for stageB!");
-    }
-  }
-  output_dot(m_stageA, m_stageB);
 }
 
 auto GpuComm::getElement(int device, size_t idx) -> T {
@@ -185,8 +136,8 @@ void GpuComm::verify(int id) {
   }
   auto dst = m_hostBuf.data();
   CHK(cudaMemcpy(dst, m_infos[id].recvBuf, sz*sizeof(T), cudaMemcpyDeviceToHost));
-  // Node id should receive original data from node m_stageA[id][0].in
-  auto t = m_stageA[id][0].in;
+  // Node id should receive original data from node m_commGraph[id][0].in
+  auto t = m_commGraph[id][0].in;
   if(id == 2) // HACK HACK
     return;
   t = 1 - id;
@@ -212,13 +163,13 @@ void GpuComm::verify(int id) {
 }
 
 #if USE_CUSTOM_QCCL
-void GpuComm::run_single_gpu(int id, int stage) 
+void GpuComm::run_single_gpu(int id) 
 {
   auto& info = m_infos[id];
-  const auto& V = stage == 0 ? m_stageA[id] : m_stageB[id];
+  const auto& V = m_commGraph[id];
 
 #if 0
-  for(int i = 0; i <= s_nExtraPeers; i++) {
+  for(int i = 0; i <= m_nExtraPeers; i++) {
       int sendP = V[i].out, recvP = V[i].in;
       auto size = m_sizes[i] * sizeof(T);
       CHKQCCL(qcclSendRecv(id, recvP, info.recvBuf, size,
@@ -244,10 +195,10 @@ void GpuComm::run_single_gpu(int id, int stage)
 }
 #else // !USE_CUSTOM_QCCL
 
-void GpuComm::run_single_gpu(int id, int stage) 
+void GpuComm::run_single_gpu(int id) 
 {
   auto& info = m_infos[id];
-  const auto& V = stage == 0 ? m_stageA[id] : m_stageB[id];
+  const auto& V = m_commGraph[id];
 
   auto type = getNcclType();
   int rank;
@@ -255,28 +206,11 @@ void GpuComm::run_single_gpu(int id, int stage)
   // CHKNCCL(ncclCommCuDevice(m_comms[i], &dev));
   ncclCommUserRank(info.comm, &rank);
   CHKNCCL(ncclGroupStart());
-  if(stage == 0) {
-    for(int i = 0; i <= s_nExtraPeers; i++) {
-      int sendP = V[i].out, recvP = V[i].in;
-      CHKNCCL(ncclSend(info.sendBuf + m_offsets[i], 
-            m_sizes[i], type, sendP, info.comm, info.stream));
-      CHKNCCL(ncclRecv(info.recvBuf + m_offsets[i], 
-            m_sizes[i], type, recvP, info.comm, info.stream));
-    }
-  } else {
-    // std::lock_guard _(m_verifyMtx);
-    // NOTE: you screw up send buffer here => hence verify iter must be the 1st one !!!
-    for(int i = 1; i <= s_nExtraPeers; i++) {
-      CHK(cudaMemcpyAsync(info.sendBuf + m_offsets[i], info.recvBuf + m_offsets[i],
-          m_sizes[i]*sizeof(T), cudaMemcpyDeviceToDevice, info.stream));
-
-      int sendP = V[i-1].out, recvP = V[i-1].in;
-      CHKNCCL(ncclSend(info.sendBuf + m_offsets[i], 
-          m_sizes[i], type, sendP, info.comm, info.stream));
-      CHKNCCL(ncclRecv(info.recvBuf + m_offsets[i], 
-          m_sizes[i], type, recvP, info.comm, info.stream));
-    }
-  }
+  int sendP = V[0].out, recvP = V[0].in;
+  CHKNCCL(ncclSend(info.sendBuf, 
+        m_curElems, type, sendP, info.comm, info.stream));
+  CHKNCCL(ncclRecv(info.recvBuf, 
+        m_curElems, type, recvP, info.comm, info.stream));
   CHKNCCL(ncclGroupEnd());
 }
 #endif // USE_CUSTOM_QCCL
@@ -294,19 +228,19 @@ void GpuComm::run(size_t numElems, int numIters, bool measureTime, bool verifyDa
     });
   }
 
-  m_offsets.resize(s_nExtraPeers + 1);
-  m_sizes.resize(s_nExtraPeers + 1);
+  m_offsets.resize(m_nExtraPeers + 1);
+  m_sizes.resize(m_nExtraPeers + 1);
   m_offsets[0] = 0;
-  m_sizes[0] = ((size_t)(m_curElems * s_splitFactor) + 3) & ~3;
-  // remaining is to be split evenly between s_nExtraPeers
+  m_sizes[0] = ((size_t)(m_curElems * m_splitFactor) + 3) & ~3;
+  // remaining is to be split evenly between m_nExtraPeers
   size_t remaining = m_curElems - m_sizes[0], ofs = m_sizes[0],
-      step = s_nExtraPeers > 0 ? (remaining / s_nExtraPeers + 3) & ~3 : 0;
-  for(uint32_t i = 1; i <= s_nExtraPeers; i++, ofs += step) {
+      step = m_nExtraPeers > 0 ? (remaining / m_nExtraPeers + 3) & ~3 : 0;
+  for(uint32_t i = 1; i <= m_nExtraPeers; i++, ofs += step) {
     m_offsets[i] = ofs;
     m_sizes[i] = step;
   }
-  m_sizes[s_nExtraPeers] = m_curElems - m_offsets[s_nExtraPeers];
-  // for(uint32_t i = 0; i <= s_nExtraPeers; i++) {
+  m_sizes[m_nExtraPeers] = m_curElems - m_offsets[m_nExtraPeers];
+  // for(uint32_t i = 0; i <= m_nExtraPeers; i++) {
   //   PRINTZ("%d: ofs: %lX; size: %lX; sum: %lX", 
   //         i, m_offsets[i], m_sizes[i], m_offsets[i] + m_sizes[i]);
   // }
@@ -324,16 +258,9 @@ void GpuComm::run_thread(int id, int numIters, bool verifyData)
   CPU_BEGIN_TIMING(T);
   for(int i = 0; i < numIters; i++) {
     //VLOG("\n============================ " << m_curElems << " =============================\n");
-    run_single_gpu(id, 0);
+    run_single_gpu(id);
     CHK(cudaStreamSynchronize(info.stream));
     //std::this_thread::sleep_for(std::chrono::milliseconds(100));
-#if !USE_CUSTOM_QCCL
-    //m_barrier.wait(); // wait all threads to arrive here before starting timing
-    // run_single_gpu(id, 1);
-    // for(auto& s : info.streams) {
-    //   CHK(cudaStreamSynchronize(s));
-    // }
-#endif
   } // for
 
   auto tnow = std::chrono::high_resolution_clock::now();
@@ -361,7 +288,7 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
 {
   int nGpus = 0, nwarmups = 5, niters = 10;
   CHK(hipGetDeviceCount(&nGpus));
-  nGpus = 3;
+  nGpus = 4;
   VLOG("Num devices: " << nGpus << "; max data size: " << 
       (double)(elemsMax*sizeof(GpuComm::T))/(1024*1024) << 
         " Mb; neighbour exchange with "

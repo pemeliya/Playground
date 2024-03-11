@@ -47,15 +47,6 @@ private:
   uint32_t m_nrows, m_ncols;
 };
 
-struct Node {
-  uint32_t in, out; // this Node sends to Node[out] and receives from Node[in]
-};
-
-constexpr static uint32_t s_bogus = 0xFFFFFFFFu; // to catch uninitialized entries
-
-void output_dot(const Matrix<Node>& stageA, const Matrix<Node>& stageB);
-std::vector< uint32_t > permute_op(uint32_t nGpus);
-
 struct GpuComm {
 
   using T = uint32_t;
@@ -70,30 +61,20 @@ public:
     double elapsedMs;     // time elapsed per thread
   };
 
-  ncclUniqueId m_ncclId;
-  size_t m_nGpus, m_maxElems, m_curElems; // total and current data transfer size
-  bool m_measureTime = false;
-  std::vector< ThreadInfo > m_infos;
-  std::vector< T > m_hostBuf;
-  std::mutex m_verifyMtx;
-  Barrier m_barrier;
-  ThreadPool m_pool;
-  Matrix<Node> m_stageA, m_stageB; // "topology graphs" for stage1 all-to-all and stage 2
-
+  struct Node {
+    uint32_t in, out; // this Node sends to Node[out] and receives from Node[in]
+  };
+  constexpr static uint32_t s_bogus = 0xFFFFFFFFu; // to catch uninitialized entries
   constexpr static uint8_t s_fillValue = 0xAA;
   constexpr static uint8_t s_oobValue = 0xDD;
   constexpr static uint32_t s_redzoneElems = 64; // number of OOB elements for redzone check
-  constexpr static uint32_t s_nExtraPeers = 0; // if zero, all traffic is sent directly
-  constexpr static double s_splitFactor = 1.0; // this much of traffic is sent to target GPUs directly
-
-  std::vector< size_t > m_offsets, m_sizes;
 
 public:
   GpuComm(size_t nGpus, size_t maxElems);
 
   ~GpuComm();
 
-  constexpr auto getNcclType() {
+  constexpr int32_t getNcclType() {
 #define OO(type, id) \
   if constexpr(std::is_same_v<T, type>) return id
     OO(int8_t, ncclInt8);
@@ -108,21 +89,38 @@ public:
 #undef OO
   }
 
-  void init_extra_peers();
-
-  T getElement(int device, size_t idx);
-
   void init();
+  void run_single_gpu(int id);
+  void run(size_t numElems, int numIters, bool measureTime = false, bool verifyData = false);
+  void run_thread(int id, int numIters, bool verifyData);
 
+private:
+  void init_extra_peers();
+  T getElement(int device, size_t idx);
   void fill_verify_data(int id);
-
   void verify(int id);
 
-  void run_single_gpu(int id, int stage);
+  void output_dot();
+  std::vector< uint32_t > permute_op();
 
-  void run(size_t numElems, int numIters, bool measureTime = false, bool verifyData = false);
+  friend std::ostream& operator<<(std::ostream& ofs, const Node& n) {
+    return ofs << '(' << n.in << ',' << n.out << ')';
+  }
 
-  void run_thread(int id, int numIters, bool verifyData);
+private:
+  ncclUniqueId m_ncclId;
+  size_t m_nGpus, m_maxElems, m_curElems; // total and current data transfer size
+  size_t m_nExtraPeers; // if zero, all traffic is sent directly
+  double m_splitFactor; // this much of traffic is sent to target GPUs directly
+
+  bool m_measureTime = false;
+  std::vector< ThreadInfo > m_infos;
+  std::vector< T > m_hostBuf;
+  std::mutex m_verifyMtx;
+  Barrier m_barrier;
+  ThreadPool m_pool;
+  Matrix<Node> m_commGraph; // "topology graph" for all-to-all communication
+  std::vector< size_t > m_offsets, m_sizes;
 
 }; // struct GpuComm
 
