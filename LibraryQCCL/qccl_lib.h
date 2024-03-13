@@ -17,7 +17,8 @@ enum QCCL_Result : uint32_t {
     ThrowError<>("%s:%d: QCCL failed with %d", __FILE__, __LINE__, (int)res); \
   }
 
-QCCL_Result qcclInit(uint32_t nGpus);
+// if gpuIds is nullptr, then GPU IDs assigned are [0..nGpus-1]
+QCCL_Result qcclInit(uint32_t nGpus, const uint32_t *gpuIds);
 
 // function run on a thread: this ID receives from recvPeer and sends to sendPeer
 QCCL_Result qcclSendRecv(uint32_t ID, uint32_t numSubscribedPeers, 

@@ -13,7 +13,7 @@
 #include "common/threading.hpp"
 #include "common/example_utils.hpp"
 
-#if 1
+#if 0
 #define gprint(fmt, ...) printf(fmt"\n", ##__VA_ARGS__)
 #else
 #define gprint(fmt, ...)
@@ -103,14 +103,14 @@ public:
     return obj;
   }
 
-  QCCL_Result init(size_t nGpus) {
+  QCCL_Result init(size_t nGpus, const uint32_t *gpuIds) {
     if(m_initialized) return QCCL_Result::OK;
 
     m_infos.resize(nGpus);
-    int i = 0;
     size_t exchangeSz = sizeof(void *) * STotalSlots;
-    for(auto& info : m_infos) {
-      info.gpuId = i++;
+    for(uint32_t i = 0; i < nGpus; i++) {
+      auto& info = m_infos[i];
+      info.gpuId = gpuIds != nullptr ? gpuIds[i] : i;
       info.workItems.reserve(s_defNumWorkItems);
       CHK(cudaSetDevice(info.gpuId));
       int flags = //hipDeviceMallocDefault;
@@ -124,14 +124,15 @@ public:
     for(const auto& info : m_infos) {
       CHK(cudaSetDevice(info.gpuId));
       for(uint32_t j = 0; j < nGpus; j++) {
-        if(info.gpuId == j)
+        auto gj = m_infos[j].gpuId;
+        if(info.gpuId == gj)
           continue;
         int enable = -1;
-        CHK(cudaDeviceCanAccessPeer(&enable, info.gpuId, j));
+        CHK(cudaDeviceCanAccessPeer(&enable, info.gpuId, gj));
         if(enable == 0) {
-          ThrowError<>("GPU %d is unable to access peer %d", info.gpuId, j);
+          ThrowError<>("GPU %d is unable to access peer %d", info.gpuId, gj);
         }
-        CHK(cudaDeviceEnablePeerAccess(j, 0));
+        CHK(cudaDeviceEnablePeerAccess(gj, 0));
       }
     } // for info
     m_initialized = true;
@@ -181,13 +182,10 @@ public:
     return QCCL_Result::OK;
   }
 
-  // 0 --> 1
-  // 0 --> 2 --> 1
   // 2 needs read buffer from 0 and write buffer from 1
   // for node zero sendPeer is 1, hence node 0 will be waiting for node 1
   // to get write buffer from node 1, the gateway node '2' must connect 
   // to node's 1 exchange buffer with node 0
-
   QCCL_Result gatewaySend(uint32_t ID, uint32_t numSubscribedPeers,
          uint32_t peerStart, uint32_t peerEnd, 
          size_t dataOfs, size_t dataSize) {
@@ -234,6 +232,7 @@ public:
     uint32_t nBlocks = info.workItems.size();
     // VLOG(ID << ": workItemSz: " << sizeof(WorkInfo) << " running with #blocks:" 
     //        << nBlocks);
+    // NOTE: do we really need to copy workBuf all the time ???
     CHK(cudaMemcpyAsync(info.workBuf, info.workItems.data(), 
           sizeof(WorkInfo) * nBlocks, cudaMemcpyHostToDevice, stream));
     
@@ -298,17 +297,20 @@ __forceinline__ __device__ void setupInPtrs(void *targetBuf) {
   //atomicAdd(counter, 0);
 
   // Wait for consumer to consume previous value before trampling it.
-  while((void *)ATOMIC_LOAD((uint64_t GLOBAL *)slot) != nullptr);
+  while((void *)ATOMIC_LOAD((uint64_t GLOBAL *)(slot + STargetBuf)) != nullptr);
   // Encode pointer by XOR'ing against some address they definitely wouldn't send
   // since we want to allow them sending us nullptr while not colliding with
   // the empty slot value.
   auto xorval = (void *)(reinterpret_cast<uintptr_t>(targetBuf) ^ 
                          reinterpret_cast<uintptr_t>(slot));
-  ATOMIC_STORE(slot, xorval);
+  ATOMIC_STORE(slot + STargetBuf, xorval);
   
-  // TODO: maybe do this in another warp ??
   // we also publish our own data buf (sendBuf)
-  ATOMIC_STORE(slot + SSourceBuf, (void *)(ds_work.outgoing.sourceBuf));
+  xorval = (void *)(reinterpret_cast<uintptr_t>(ds_work.outgoing.sourceBuf) ^ 
+                    reinterpret_cast<uintptr_t>(slot));
+  // NOTE: we should also do a while loop for source buf since otherwise
+  // it is unsynchronized..
+  ATOMIC_STORE(slot + SSourceBuf, xorval);
   // gprint("%d / %p: Sent target buffer: %p to send peer %d", 
   //         ds_work.ID, slot, targetBuf, ds_work.incoming.peer);
 }
@@ -318,15 +320,16 @@ __forceinline__ __device__ void setupGatewayPtrs() {
   // we read source buffer from incoming peer since we would like to 
   // forward its data to the outgoing peer
   auto& item = ds_work.incoming;
-  auto slot = (void *volatile GLOBAL *)item.exchangeBuf + SSourceBuf;
+  auto slot = (void *volatile GLOBAL *)item.exchangeBuf;
   // gprint("%d / %p: Starting receive GW input buf", ds_work.ID, slot);
 
   void *ptr;
   while (true) {
-    ptr = (void *)ATOMIC_LOAD((uint64_t GLOBAL *)slot);
+    ptr = (void *)ATOMIC_LOAD((uint64_t GLOBAL *)(slot + SSourceBuf));
     if (ptr != nullptr) break;
   }
-  ds_work.outgoing.sourceBuf = (uint8_t *)(reinterpret_cast<uintptr_t>(ptr));
+  ds_work.outgoing.sourceBuf = (uint8_t *)(reinterpret_cast<uintptr_t>(ptr) ^ 
+                                           reinterpret_cast<uintptr_t>(slot));
   gprint("%d / %p: Received SRC buf: %p from peer %d", 
             ds_work.ID, slot, ds_work.outgoing.sourceBuf, 
                         ds_work.outgoing.peer);
@@ -340,7 +343,7 @@ __forceinline__ __device__ void setupOutPtrs() {
 
   void *ptr;
   while (true) {
-    ptr = (void *)ATOMIC_LOAD((uint64_t GLOBAL*)slot);
+    ptr = (void *)ATOMIC_LOAD((uint64_t GLOBAL*)(slot + STargetBuf));
     if (ptr != nullptr) break;    
   }
   ds_work.incoming.targetBuf = (uint8_t *)(reinterpret_cast<uintptr_t>(ptr) ^ 
@@ -467,8 +470,6 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
     //   ds_work.ID, ds_work.outgoing.sourceBuf,
     //   ds_work.incoming.targetBuf, isGateway);
   }
-  //if(isGateway) // HACK we let gateways to do all job
-  //  return;
 
   using Word = uint64_t;
   const uint32_t bytes = ds_work.outgoing.size, 
@@ -514,25 +515,12 @@ Data size: 283.50 Mb; time elapsed: 8.474 ms, bandwidth: 35.082 Gb/s
                           (ofs, 1, nwords32);
   }
   __threadfence_system(); // TODO check if it's correct
-
   // NOTE: it could be that some channel is only sender or only receiver ??
-  
-  // NOTE: we should set 'done' flag only then when all blocks have 
-  // successfully written to the destination
-  
-  // sender (outgoing) increments 'ready' flag
-  // receiver (incoming) waits for ready flag to be set properly
-
-  // loop {
-    
-  // }
-  // receiver should wait until all senders increment its 'ready flag'
-
   finalizeSendRecv(tid);
 }
 
-QCCL_Result qcclInit(uint32_t nGpus) {
-  return GpuCommLib::i().init(nGpus);
+QCCL_Result qcclInit(uint32_t nGpus, const uint32_t *gpuIds) {
+  return GpuCommLib::i().init(nGpus, gpuIds);
 }
 
 QCCL_Result qcclSendRecv(uint32_t ID, uint32_t numSubscribedPeers, 

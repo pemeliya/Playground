@@ -47,7 +47,7 @@ private:
   uint32_t m_nrows, m_ncols;
 };
 
-struct GpuComm {
+struct TestFramework {
 
   using T = uint32_t;
 public:  
@@ -70,9 +70,9 @@ public:
   constexpr static uint32_t s_redzoneElems = 64; // number of OOB elements for redzone check
 
 public:
-  GpuComm(size_t nGpus, size_t maxElems);
+  TestFramework(size_t nGpus, const uint32_t *gpuIDs, size_t maxElems);
 
-  ~GpuComm();
+  ~TestFramework();
 
   constexpr int32_t getNcclType() {
 #define OO(type, id) \
@@ -89,7 +89,6 @@ public:
 #undef OO
   }
 
-  void init();
   void run_single_gpu(int id);
   void run(size_t numElems, int numIters, bool measureTime = false, bool verifyData = false);
   void run_thread(int id, int numIters, bool verifyData);
@@ -122,6 +121,6 @@ private:
   Matrix<Node> m_commGraph; // "topology graph" for all-to-all communication
   std::vector< size_t > m_offsets, m_sizes;
 
-}; // struct GpuComm
+}; // struct TestFramework
 
 #endif // TEST_MAIN_H

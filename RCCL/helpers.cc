@@ -8,7 +8,7 @@
 #include "test_main.h"
 #include "qccl_lib.h"
 
-std::vector< uint32_t > GpuComm::permute_op() 
+std::vector< uint32_t > TestFramework::permute_op() 
 {
   std::vector< uint32_t > permute(m_nGpus);
   for(uint32_t i = 0; i < m_nGpus; i++) {
@@ -34,7 +34,7 @@ std::vector< uint32_t > GpuComm::permute_op()
   return permute;
 }
 
-void GpuComm::init_extra_peers() {
+void TestFramework::init_extra_peers() {
 
   auto permute = permute_op();
   for(uint32_t i = 0; i < m_nGpus; i++) {
@@ -87,7 +87,7 @@ void GpuComm::init_extra_peers() {
 
 //! https://visjs.github.io/vis-network/examples/network/edgeStyles/smoothWorldCup.html
 //! neato topology.dot -Tpng > topology.png 
-void GpuComm::output_dot() {
+void TestFramework::output_dot() {
   static const char *colors[] = {
         "aquamarine", "cornflowerblue", "chocolate1", "darkgreen",
         "darkorchid", "deeppink", "fuchsia", "goldenrod2"};

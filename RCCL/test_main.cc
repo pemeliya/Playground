@@ -39,7 +39,8 @@ Thread pool joined
         __FILE__,__LINE__, ncclGetErrorString(res));     \
   }
 
-GpuComm::GpuComm(size_t nGpus, size_t maxElems) : m_nGpus(nGpus), m_maxElems(maxElems),
+TestFramework::TestFramework(size_t nGpus, const uint32_t *gpuIDs,
+       size_t maxElems) : m_nGpus(nGpus), m_maxElems(maxElems),
       m_curElems(maxElems), 
       m_nExtraPeers(1), // if zero, all traffic is sent directly
       m_splitFactor(0.99), // this much of traffic is sent to target GPUs directly
@@ -49,33 +50,14 @@ GpuComm::GpuComm(size_t nGpus, size_t maxElems) : m_nGpus(nGpus), m_maxElems(max
   if((m_nExtraPeers == 0 && m_splitFactor != 1.0) || m_nExtraPeers >= m_nGpus-1) {
     throw std::runtime_error("Wrong number of extra peers!");
   }
-}
 
-GpuComm::~GpuComm() {
-  for(auto& info : m_infos) {
-    (void)cudaSetDevice(info.gpuId);
-    (void)cudaStreamDestroy(info.stream);
-    (void)cudaFree(info.sendBuf);
-#if !USE_CUSTOM_QCCL
-    (void)ncclCommDestroy(info.comm);
-#endif
-    }
-}
-
-auto GpuComm::getElement(int device, size_t idx) -> T {
-  //return static_cast<T>(100.0f*std::sin((float)idx*2*M_PI/(device+2)));
-  return static_cast<T>(device - 11111);
-}
-
-void GpuComm::init() 
-{
 #if USE_CUSTOM_QCCL
-  CHKQCCL(qcclInit(m_nGpus));
+  CHKQCCL(qcclInit(m_nGpus, gpuIDs));
 #else
   CHKNCCL(ncclGetUniqueId(&m_ncclId));
 #endif
 
-  m_pool.runJob([this](int id) {
+  m_pool.runJob([this, gpuIDs](int id) {
     auto& info = m_infos[id];
     size_t obytes = s_redzoneElems*sizeof(T),
           nBytes = (m_maxElems + s_redzoneElems)*sizeof(T);
@@ -83,7 +65,7 @@ void GpuComm::init()
       std::lock_guard _(m_verifyMtx);
       VLOG("Allocating buffers and data init for GPU " << id);
     }
-    info.gpuId = id;
+    info.gpuId = gpuIDs != nullptr ? gpuIDs[id] : id;
     CHK(cudaSetDevice(info.gpuId));
     int flags = hipDeviceMallocDefault;
                 //hipDeviceMallocFinegrained;
@@ -104,7 +86,23 @@ void GpuComm::init()
   CHK(cudaDeviceSynchronize());
 }
 
-void GpuComm::fill_verify_data(int id) {
+TestFramework::~TestFramework() {
+  for(auto& info : m_infos) {
+    (void)cudaSetDevice(info.gpuId);
+    (void)cudaStreamDestroy(info.stream);
+    (void)cudaFree(info.sendBuf);
+#if !USE_CUSTOM_QCCL
+    (void)ncclCommDestroy(info.comm);
+#endif
+    }
+}
+
+auto TestFramework::getElement(int device, size_t idx) -> T {
+  //return static_cast<T>(100.0f*std::sin((float)idx*2*M_PI/(device+2)));
+  return static_cast<T>(device - 11111);
+}
+
+void TestFramework::fill_verify_data(int id) {
 
   size_t obytes = s_redzoneElems*sizeof(T),
          nBytes = m_curElems*sizeof(T);
@@ -119,7 +117,7 @@ void GpuComm::fill_verify_data(int id) {
   std::vector< T > refBuf(m_curElems);
 #if VERIFY_DATA
   for(size_t i = 0; i < m_curElems; i++) {
-    refBuf[i] = getElement(info.gpuId, i);
+    refBuf[i] = getElement(id, i);
   }
 #else
   std::fill(refBuf.begin(), refBuf.end(), T(id));
@@ -128,7 +126,7 @@ void GpuComm::fill_verify_data(int id) {
             info.stream));
 }
 
-void GpuComm::verify(int id) {
+void TestFramework::verify(int id) {
   std::lock_guard _(m_verifyMtx);
   auto sz = m_curElems + s_redzoneElems;
   if(m_hostBuf.size() < sz) {
@@ -163,7 +161,7 @@ void GpuComm::verify(int id) {
 }
 
 #if USE_CUSTOM_QCCL
-void GpuComm::run_single_gpu(int id) 
+void TestFramework::run_single_gpu(int id) 
 {
   auto& info = m_infos[id];
   const auto& V = m_commGraph[id];
@@ -201,7 +199,7 @@ void GpuComm::run_single_gpu(int id)
 }
 #else // !USE_CUSTOM_QCCL
 
-void GpuComm::run_single_gpu(int id) 
+void TestFramework::run_single_gpu(int id) 
 {
   auto& info = m_infos[id];
   const auto& V = m_commGraph[id];
@@ -221,7 +219,7 @@ void GpuComm::run_single_gpu(int id)
 }
 #endif // USE_CUSTOM_QCCL
 
-void GpuComm::run(size_t numElems, int numIters, bool measureTime, bool verifyData) {
+void TestFramework::run(size_t numElems, int numIters, bool measureTime, bool verifyData) {
 
   m_measureTime = measureTime;
   m_curElems = numElems;
@@ -256,7 +254,7 @@ void GpuComm::run(size_t numElems, int numIters, bool measureTime, bool verifyDa
   });
 }
 
-void GpuComm::run_thread(int id, int numIters, bool verifyData) 
+void TestFramework::run_thread(int id, int numIters, bool verifyData) 
 {
   m_barrier.wait(); // wait all threads to arrive here before starting timing
   auto& info = m_infos[id];
@@ -296,7 +294,7 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
   CHK(hipGetDeviceCount(&nGpus));
   nGpus = 3;
   VLOG("Num devices: " << nGpus << "; max data size: " << 
-      (double)(elemsMax*sizeof(GpuComm::T))/(1024*1024) << 
+      (double)(elemsMax*sizeof(TestFramework::T))/(1024*1024) << 
         " Mb; neighbour exchange with "
 #if USE_CUSTOM_QCCL
       "MINI QCCL"
@@ -304,13 +302,16 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
       "RCCL"
 #endif
   );
+  std::vector< uint32_t > deviceAssignment{ 1, 2, 3 };
+  if(nGpus > deviceAssignment.size()) {
+    throw std::runtime_error("Invalid device assignment!");
+  }
 
-  GpuComm obj(nGpus, elemsMax);
-  obj.init();
+  TestFramework obj(nGpus, deviceAssignment.data(), elemsMax);
 #if VERIFY_DATA
   obj.run(elemsMin, 1, false, true); // first run to verify data
 #endif
-  return;
+  //return;
 
   obj.run(elemsMax, (nwarmups+1)/2);
   obj.run(elemsMin, nwarmups/2);
@@ -339,8 +340,8 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
 int main() try 
 {
   DeviceInit(0);
-  //size_t sMin = 2322432, sMax = 9289728*8;
-  size_t sMin = 1011*111, sMax = sMin;
+  size_t sMin = 2322432, sMax = 9289728*8;
+  // size_t sMin = 1011*111, sMax = sMin;
   runRCCLTest(sMin, sMax);
 }
 catch(std::exception& ex) {
