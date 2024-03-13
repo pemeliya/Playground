@@ -17,6 +17,10 @@
 #define USE_CUSTOM_QCCL 1
 // whether to use light variant with just 3 GPUs for debugging extra peers
 #define USE_DEBUG_CONFIG_3_GPUS 1
+// if zero, all traffic is sent directly to target GPUs
+#define NUM_EXTRA_PEERS 0
+// this portion of traffic is sent to target GPUs directly (1: whole traffic)
+#define EXTRA_PEERS_SPLIT_FACTOR 1 
 #define VERIFY_DATA 1
 
 #if USE_DEBUG_CONFIG_3_GPUS && !USE_CUSTOM_QCCL
@@ -48,8 +52,8 @@ Thread pool joined
 TestFramework::TestFramework(size_t nGpus, const uint32_t *gpuIDs,
        size_t maxElems) : m_nGpus(nGpus), m_maxElems(maxElems),
       m_curElems(maxElems), 
-      m_nExtraPeers(1), // if zero, all traffic is sent directly
-      m_splitFactor(0.75), // this much of traffic is sent to target GPUs directly
+      m_nExtraPeers(NUM_EXTRA_PEERS), 
+      m_splitFactor(EXTRA_PEERS_SPLIT_FACTOR), 
       m_infos(nGpus), m_barrier(nGpus), m_pool(nGpus),
       m_commGraph(nGpus, m_nExtraPeers + 1, Node{s_bogus,s_bogus}) 
 { 
@@ -191,7 +195,7 @@ void TestFramework::run_single_gpu(int id)
   uint32_t numSubscribedPeers = 2;
   // make sizes divisible by 4
   size_t size = m_curElems * sizeof(T),
-         sz1 = (size * 2 / 3 + 3) & ~3, 
+         sz1 = (size * 3 / 3 + 3) & ~3, 
          sz2 = (size - sz1);
 
   if(id == 0 || id == 1) {
@@ -254,11 +258,15 @@ void TestFramework::run(size_t numElems, int numIters, bool measureTime, bool ve
     m_sizes[i] = step;
   }
   m_sizes[m_nExtraPeers] = m_curElems - m_offsets[m_nExtraPeers];
+#if !USE_DEBUG_CONFIG_3_GPUS // this is not relevant for debug config
+  if(verifyData) {
+    PRINTZ("curElems: %u / 0x%lX", m_curElems, m_curElems);
+  }
   for(uint32_t i = 0; i <= m_nExtraPeers && verifyData; i++) {
-    PRINTZ("%d: ofs: %lX; size: %lX; sum: %lX", 
+    PRINTZ("%d: ofs: %lX; size: %lX; sum: %lX elems", 
           i, m_offsets[i], m_sizes[i], m_offsets[i] + m_sizes[i]);
   }
-  
+#endif
   m_pool.runJob([&,this](int id) {
     run_thread(id, numIters, verifyData);
   });
@@ -324,7 +332,7 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
 #if VERIFY_DATA
   obj.run(elemsMin, 1, false, true); // first run to verify data
 #endif
-  //return;
+  return;
 
   obj.run(elemsMax, (nwarmups+1)/2);
   obj.run(elemsMin, nwarmups/2);
@@ -353,8 +361,8 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
 int main() try 
 {
   DeviceInit(0);
-  size_t sMin = 2322432, sMax = 9289728*8;
-  // size_t sMin = 1011*111, sMax = sMin;
+  //size_t sMin = 2322432, sMax = 9289728*8;
+  size_t sMin = 1011*111, sMax = sMin;
   runRCCLTest(sMin, sMax);
 }
 catch(std::exception& ex) {

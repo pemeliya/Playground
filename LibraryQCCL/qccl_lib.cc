@@ -34,8 +34,13 @@
 #define STORE(x, addr) (addr)[0] = (x)
 #endif
 
+#if 0
 #define ATOMIC_LOAD(VAR)       __atomic_load_n((VAR),         __ATOMIC_ACQUIRE)
 #define ATOMIC_STORE(PTR, VAL) __atomic_store_n((PTR), (VAL), __ATOMIC_RELEASE)
+#else
+#define ATOMIC_LOAD(VAR)       (VAR)[0]
+#define ATOMIC_STORE(PTR, VAL) (PTR)[0] = (VAL)
+#endif
 
 enum SlotInfo {
   STargetBuf = 0,
@@ -84,7 +89,7 @@ class GpuCommLib {
 
   static constexpr size_t s_defNumWorkItems = 8;
   static constexpr size_t s_numWorkThreads = 512;
-  static constexpr size_t s_numRegsPerThread = 24;
+  static constexpr size_t s_numRegsPerThread = 16;
 
   struct ThreadInfo {
     int gpuId;             // gpu ID assigned to this thread
@@ -415,17 +420,17 @@ void copyMainLoop(uint32_t ofs, const uint32_t niters, const uint32_t nwords) {
     auto src_ofs = ofs;
 #pragma unroll
     for(uint32_t i = 0; i < NumRegs/2; i++, src_ofs += BlockSz*2) {
-      if(!Check || src_ofs < nwords)
+      if(!Check || src_ofs + 1 < nwords) {
         regs[2*i] = LOAD(srcBuf + src_ofs);
-      if(!Check || src_ofs + 1 < nwords)
         regs[2*i + 1] = LOAD(srcBuf + src_ofs + 1);
+      }
     }
 #pragma unroll
     for(uint32_t i = 0; i < NumRegs/2; i++, ofs += BlockSz*2) {
-      if(!Check || ofs < nwords)
+      if(!Check || ofs + 1 < nwords) {
         STORE(regs[2*i], targetBuf + ofs);
-      if(!Check || ofs + 1 < nwords)
         STORE(regs[2*i + 1], targetBuf + ofs + 1);
+      }
     }
     if(!UseOuterLoop) break;
   } 
@@ -470,10 +475,9 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
     //   ds_work.ID, ds_work.outgoing.sourceBuf,
     //   ds_work.incoming.targetBuf, isGateway);
   }
-  // force quit gateway nodes earlier
-  if(ds_work.dataOfs != 0) {
-    // finalizeSendRecv(tid);
-    // return;
+  if(ds_work.dataOfs != 0) {   // force quit gateway nodes earlier
+    //  finalizeSendRecv(tid);
+    //  return;
   }
 
   using Word = uint64_t;
@@ -499,25 +503,27 @@ Data size: 283.50 Mb; time elapsed: 8.474 ms, bandwidth: 35.082 Gb/s
   {
     constexpr uint32_t bytesPerIter = BlockSz*NumRegs*sizeof(Word);
     const uint32_t bytesLeft = bytes - niters*bytesPerIter,
-                   wordsLeft = bytesLeft / sizeof(uint32_t),
-                   nwords32 = bytes / sizeof(uint32_t);
+                   wordsLeft = bytesLeft / sizeof(Word),
+                   nwords64 = bytes / sizeof(Word);
 
     if(wordsLeft >= bytesPerIter/2) {
       // do one full iteration with reduced size
     }
 
     if(tid == 0) {
-      // gprint("nwords: %d; bytes: %d mod16: %d niters: %d "
-      //        "bytesPerIter: %d bytesLeft: %d wordsLeft: %d ll: %d", 
-      //       nwords, bytes, bytes%16, niters, bytesPerIter, 
-      //       bytesLeft, wordsLeft, nwords32);
+      gprint("ID %d; nwords: %d; bytes: %d mod16: %d niters: %d "
+             "bytesPerIter: %d bytesLeft: %d wordsLeft: %d words64: %d", 
+            ds_work.ID, nwords, bytes, bytes%16, niters, bytesPerIter, 
+            bytesLeft, wordsLeft, nwords64);
     }
     // we are left with at most BlockSz*NumRegs*sizeof(Word)/sizeof(uint32_t)
     // 32-bit words to process: 512*16*2 = 16384 words at most
     // nbytes divisible by 4 !!
-    auto ofs = tid*2 + niters*bytesPerIter/sizeof(uint32_t);
-    copyMainLoop< uint32_t, BlockSz, NumRegs*2, false, true >
-                          (ofs, 1, nwords32);
+    auto ofs = tid*2 + niters*bytesPerIter/sizeof(Word);
+    // copyMainLoop< Word, BlockSz, NumRegs*2, false, true >
+    //                       (ofs, 1, nwords64);
+    
+    // the loop above covers bytes divisible by 16...
   }
   __threadfence_system(); // TODO check if it's correct
   // NOTE: it could be that some channel is only sender or only receiver ??
