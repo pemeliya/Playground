@@ -34,7 +34,7 @@
 #define STORE(x, addr) (addr)[0] = (x)
 #endif
 
-#if 0
+#if 1
 #define ATOMIC_LOAD(VAR)       __atomic_load_n((VAR),         __ATOMIC_ACQUIRE)
 #define ATOMIC_STORE(PTR, VAL) __atomic_store_n((PTR), (VAL), __ATOMIC_RELEASE)
 #else
@@ -89,7 +89,7 @@ class GpuCommLib {
 
   static constexpr size_t s_defNumWorkItems = 8;
   static constexpr size_t s_numWorkThreads = 512;
-  static constexpr size_t s_numRegsPerThread = 16;
+  static constexpr size_t s_numRegsPerThread = 24;
 
   struct ThreadInfo {
     int gpuId;             // gpu ID assigned to this thread
@@ -294,7 +294,9 @@ extern uint __llvm_amdgcn_readfirstlane(uint) __asm("llvm.amdgcn.readfirstlane")
 __forceinline__ __device__ void setupInPtrs(void *targetBuf) {
 
   // we provide the sender our incoming buffer
-  auto slot = (void *volatile GLOBAL *)ds_work.incoming.exchangeBuf;
+  // NOTE adding GLOBAL here, inserts s_waitcnt vmcnt(7) after global stores!!!.
+  // but why ???
+  auto slot = (void *volatile *)ds_work.incoming.exchangeBuf;
   auto counter = (uint32_t GLOBAL *)(slot + SReadyFlagCounter);
 
   //! NOTE hangs here because we reset ready flag too fast (or too late)
@@ -376,7 +378,7 @@ __forceinline__ __device__ void finalizeSendRecv(uint32_t tid) {
   // auto tid = gpuLaneId();
   
   if(tid == 0) {
-    void *volatile *slot = ds_work.outgoing.exchangeBuf;
+    auto slot = (void *GLOBAL *)ds_work.outgoing.exchangeBuf;
     //  __atomic_store_n(send_done, 1, __ATOMIC_SEQ_CST);
     auto readyCnt = (uint32_t *)(slot + SReadyFlagCounter);
     auto val = 1 + atomicAdd(readyCnt, 1u);
@@ -386,7 +388,7 @@ __forceinline__ __device__ void finalizeSendRecv(uint32_t tid) {
     // gateway nodes do not need to wait here
   } else if(tid == warpSize && ds_work.dataOfs == 0) {
 
-    void *volatile *slot = ds_work.incoming.exchangeBuf;
+    auto slot = (void *GLOBAL *)ds_work.incoming.exchangeBuf;
     auto readyCnt = (uint32_t GLOBAL *)(slot + SReadyFlagCounter);
 
     uint32_t cacheVal = ds_work.readyFlagCache, 
@@ -520,8 +522,8 @@ Data size: 283.50 Mb; time elapsed: 8.474 ms, bandwidth: 35.082 Gb/s
     // 32-bit words to process: 512*16*2 = 16384 words at most
     // nbytes divisible by 4 !!
     auto ofs = tid*2 + niters*bytesPerIter/sizeof(Word);
-    // copyMainLoop< Word, BlockSz, NumRegs*2, false, true >
-    //                       (ofs, 1, nwords64);
+    copyMainLoop< Word, BlockSz, NumRegs*2, false, true >
+                           (ofs, 1, nwords64);
     
     // the loop above covers bytes divisible by 16...
   }
