@@ -15,7 +15,13 @@
 #include "qccl_lib.h"
 
 #define USE_CUSTOM_QCCL 1
+// whether to use light variant with just 3 GPUs for debugging extra peers
+#define USE_DEBUG_CONFIG_3_GPUS 1
 #define VERIFY_DATA 1
+
+#if USE_DEBUG_CONFIG_3_GPUS && !USE_CUSTOM_QCCL
+#error Debug config only works for custom QCCL!
+#endif
 
 #if 0
 Using device 0: AMD Instinct MI300X ( SM940, 304 SMs, 196148 free / 196592 total MB physmem, 2662.400 GB/s @ 1300000 kHz mem clock, ECC off)
@@ -43,7 +49,7 @@ TestFramework::TestFramework(size_t nGpus, const uint32_t *gpuIDs,
        size_t maxElems) : m_nGpus(nGpus), m_maxElems(maxElems),
       m_curElems(maxElems), 
       m_nExtraPeers(1), // if zero, all traffic is sent directly
-      m_splitFactor(0.99), // this much of traffic is sent to target GPUs directly
+      m_splitFactor(0.75), // this much of traffic is sent to target GPUs directly
       m_infos(nGpus), m_barrier(nGpus), m_pool(nGpus),
       m_commGraph(nGpus, m_nExtraPeers + 1, Node{s_bogus,s_bogus}) 
 { 
@@ -136,16 +142,19 @@ void TestFramework::verify(int id) {
   CHK(cudaMemcpy(dst, m_infos[id].recvBuf, sz*sizeof(T), cudaMemcpyDeviceToHost));
   // Node id should receive original data from node m_commGraph[id][0].in
   auto t = m_commGraph[id][0].in;
+#if USE_DEBUG_CONFIG_3_GPUS  
   if(id == 2) // HACK HACK
     return;
   t = 1 - id;
+#endif
 
   VLOG("Device " << id << " verifying: expecting data from: " << t);
   for(uint32_t j = 0, num = 0; j < m_curElems; j++) {
     auto truth = getElement(t, j);
     if(dst[j] != truth) {
       //ThrowError<>("%d: verify failed truth: %f gpu: %f", j, truth, dst[j]);
-      PRINTZ("0x%X/%d: verify failed truth: %u gpu: %u", j, j, truth, dst[j]);
+      PRINTZ("0x%X/%d: verify failed truth: %d gpu: %d (%X)", j, j, 
+              truth, dst[j], dst[j]);
       if(num++ >= 5)
         break;
     }
@@ -165,7 +174,7 @@ void TestFramework::run_single_gpu(int id)
 {
   auto& info = m_infos[id];
   const auto& V = m_commGraph[id];
-#if 0
+#if !USE_DEBUG_CONFIG_3_GPUS
   uint32_t numSubscribedPeers = 1 + m_nExtraPeers;
   for(int i = 0; i <= m_nExtraPeers; i++) {
       int inP = V[i].in, outP = V[i].out;
@@ -184,6 +193,7 @@ void TestFramework::run_single_gpu(int id)
   size_t size = m_curElems * sizeof(T),
          sz1 = (size * 2 / 3 + 3) & ~3, 
          sz2 = (size - sz1);
+
   if(id == 0 || id == 1) {
     // we send and receive to/from the same node (bidirectional)
     int sendP = 1 - id, recvP = 1 - id;
@@ -204,7 +214,7 @@ void TestFramework::run_single_gpu(int id)
   auto& info = m_infos[id];
   const auto& V = m_commGraph[id];
 
-  auto type = getNcclType();
+  auto type = (ncclDataType_t)getNcclType();
   int rank;
   // CHKNCCL(ncclCommCount(m_comms[i], &nRanks));
   // CHKNCCL(ncclCommCuDevice(m_comms[i], &dev));
@@ -293,6 +303,9 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
   int nGpus = 0, nwarmups = 5, niters = 10;
   CHK(hipGetDeviceCount(&nGpus));
   nGpus = 3;
+#if USE_DEBUG_CONFIG_3_GPUS  
+  if(nGpus != 3) throw std::runtime_error("Only 3 GPUs in debug variant!!");
+#endif  
   VLOG("Num devices: " << nGpus << "; max data size: " << 
       (double)(elemsMax*sizeof(TestFramework::T))/(1024*1024) << 
         " Mb; neighbour exchange with "
@@ -302,7 +315,7 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
       "RCCL"
 #endif
   );
-  std::vector< uint32_t > deviceAssignment{ 1, 2, 3 };
+  std::vector< uint32_t > deviceAssignment{ 2, 3, 4 };
   if(nGpus > deviceAssignment.size()) {
     throw std::runtime_error("Invalid device assignment!");
   }

@@ -470,6 +470,11 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
     //   ds_work.ID, ds_work.outgoing.sourceBuf,
     //   ds_work.incoming.targetBuf, isGateway);
   }
+  // force quit gateway nodes earlier
+  if(ds_work.dataOfs != 0) {
+    // finalizeSendRecv(tid);
+    // return;
+  }
 
   using Word = uint64_t;
   const uint32_t bytes = ds_work.outgoing.size, 
