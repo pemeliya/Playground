@@ -13,7 +13,7 @@
 #include "common/threading.hpp"
 #include "common/example_utils.hpp"
 
-#if 0
+#if 1
 #define gprint(fmt, ...) printf(fmt"\n", ##__VA_ARGS__)
 #else
 #define gprint(fmt, ...)
@@ -290,22 +290,25 @@ extern uint __llvm_amdgcn_readfirstlane(uint) __asm("llvm.amdgcn.readfirstlane")
 __forceinline__ __device__ void setupInPtrs(void *targetBuf) {
 
   // we provide the sender our incoming buffer
-  void *volatile *slot = ds_work.incoming.exchangeBuf;
-  auto counter = (uint32_t *)(slot + SReadyFlagCounter);
+  auto slot = (void *volatile GLOBAL *)ds_work.incoming.exchangeBuf;
+  auto counter = (uint32_t GLOBAL *)(slot + SReadyFlagCounter);
 
   //! NOTE hangs here because we reset ready flag too fast (or too late)
-  ds_work.readyFlagCache = atomicAdd(counter, 0);
+  ds_work.readyFlagCache = ATOMIC_LOAD(counter);
+  //atomicAdd(counter, 0);
 
   // Wait for consumer to consume previous value before trampling it.
-  while((void *)atomicAdd((uint64_t *)slot, 0) != nullptr);
+  while((void *)ATOMIC_LOAD((uint64_t GLOBAL *)slot) != nullptr);
   // Encode pointer by XOR'ing against some address they definitely wouldn't send
   // since we want to allow them sending us nullptr while not colliding with
   // the empty slot value.
-  *slot = (void *)(reinterpret_cast<uintptr_t>(targetBuf) ^ 
-                   reinterpret_cast<uintptr_t>(slot));
+  auto xorval = (void *)(reinterpret_cast<uintptr_t>(targetBuf) ^ 
+                         reinterpret_cast<uintptr_t>(slot));
+  ATOMIC_STORE(slot, xorval);
+  
   // TODO: maybe do this in another warp ??
   // we also publish our own data buf (sendBuf)
-  slot[SSourceBuf] = (void *)(ds_work.outgoing.sourceBuf);
+  ATOMIC_STORE(slot + SSourceBuf, (void *)(ds_work.outgoing.sourceBuf));
   // gprint("%d / %p: Sent target buffer: %p to send peer %d", 
   //         ds_work.ID, slot, targetBuf, ds_work.incoming.peer);
 }
@@ -315,16 +318,12 @@ __forceinline__ __device__ void setupGatewayPtrs() {
   // we read source buffer from incoming peer since we would like to 
   // forward its data to the outgoing peer
   auto& item = ds_work.incoming;
-  void *volatile *slot = item.exchangeBuf + SSourceBuf;
-  // gprint("%d / %p: Starting receive GW input buf",
-  //     ds_work.ID, slot);
+  auto slot = (void *volatile GLOBAL *)item.exchangeBuf + SSourceBuf;
+  // gprint("%d / %p: Starting receive GW input buf", ds_work.ID, slot);
 
-  // asm volatile("global_load_dword %0, %1, off" : "=v"(c0) : "v"(slot));
   void *ptr;
   while (true) {
-    //global_atomic_add_u64((uint64_t *)slot, 0);
-    // __builtin_amdgcn_global_atomic_fadd_f64((double *)slot, 0);
-    ptr = (void *)atomicAdd((uint64_t *)slot, 0);
+    ptr = (void *)ATOMIC_LOAD((uint64_t GLOBAL *)slot);
     if (ptr != nullptr) break;
   }
   ds_work.outgoing.sourceBuf = (uint8_t *)(reinterpret_cast<uintptr_t>(ptr));
@@ -341,10 +340,9 @@ __forceinline__ __device__ void setupOutPtrs() {
 
   void *ptr;
   while (true) {
-    ptr = (void *)atomicAdd((uint64_t *)slot, 0);
+    ptr = (void *)ATOMIC_LOAD((uint64_t GLOBAL*)slot);
     if (ptr != nullptr) break;    
   }
-
   ds_work.incoming.targetBuf = (uint8_t *)(reinterpret_cast<uintptr_t>(ptr) ^ 
                                            reinterpret_cast<uintptr_t>(slot));
   gprint("%d / %p: Received target buf: %p from recv peer %d", 
@@ -355,13 +353,13 @@ __forceinline__ __device__ void setupOutPtrs() {
 __forceinline__ __device__ void resetBufferPtrs() 
 {
   auto& item = ds_work.outgoing;
-  void *volatile *slot = item.exchangeBuf;
+  auto slot = (void * GLOBAL *)item.exchangeBuf;
   auto counter = (uint32_t *)(slot + SBufsReceivedCounter);
   auto val = 1 + atomicAdd(counter, 1);
 
   if(val % ds_work.nPeers == 0) {
     gprint("%d: resetting buffers val = %d if zero", ds_work.ID, val);
-    slot[STargetBuf] = nullptr;
+    ATOMIC_STORE(slot + STargetBuf, nullptr);
   }
 }
 
@@ -373,15 +371,15 @@ __forceinline__ __device__ void finalizeSendRecv(uint32_t tid) {
     void *volatile *slot = ds_work.outgoing.exchangeBuf;
     //  __atomic_store_n(send_done, 1, __ATOMIC_SEQ_CST);
     auto readyCnt = (uint32_t *)(slot + SReadyFlagCounter);
-    auto val = 1 + atomicAdd_system((uint32_t *)readyCnt, 1u);
+    auto val = 1 + atomicAdd(readyCnt, 1u);
     gprint("%d: incremented ready counter: %p / %d", 
-    ds_work.ID, readyCnt, val);
+            ds_work.ID, readyCnt, val);
 
-    //__atomic_store_n(sendSlot, 0, __ATOMIC_RELAXED);
-    // gateway nodes do not need to wait
+    // gateway nodes do not need to wait here
   } else if(tid == warpSize && ds_work.dataOfs == 0) {
+
     void *volatile *slot = ds_work.incoming.exchangeBuf;
-    auto readyCnt = (volatile uint32_t *)(slot + SReadyFlagCounter);
+    auto readyCnt = (uint32_t GLOBAL *)(slot + SReadyFlagCounter);
 
     uint32_t cacheVal = ds_work.readyFlagCache, 
             numPeers = ds_work.nPeers;
@@ -389,8 +387,7 @@ __forceinline__ __device__ void finalizeSendRecv(uint32_t tid) {
         ds_work.ID, readyCnt, readyCnt[0], cacheVal);
 
     while(1) {
-      // TODO possibly need to change it to atomic_load_n ??
-      auto val =  atomicAdd_system((uint32_t *)readyCnt, 0u);
+      auto val =  ATOMIC_LOAD(readyCnt);
       if(val - cacheVal == numPeers) {
         gprint("%d: Waiting done: counter: %d, cacheVal: %d", 
             ds_work.ID, val, cacheVal);
@@ -428,13 +425,7 @@ void copyMainLoop(uint32_t ofs, const uint32_t niters, const uint32_t nwords) {
         STORE(regs[2*i + 1], targetBuf + ofs + 1);
     }
     if(!UseOuterLoop) break;
-  } // for ofs
-  if(ds_work.incoming.peer == 0) {
-    // uint32_t tid = threadIdx.x;
-    // int diff = ds_work.outgoing.size - ofs*sizeof(Word);
-    // gprint("%d: ofs: %d byteOfs: %d diff: %d", tid, ofs, ofs*sizeof(Word), 
-    //       diff);
-  }
+  } 
 }
 
 // there maybe many work items: one for each gpu block..
