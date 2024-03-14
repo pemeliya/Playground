@@ -75,6 +75,7 @@ struct WorkInfo
                       // exchange buffer
   uint32_t dataOfs;   // data offset usually only set for gateway nodes !!
   uint32_t readyFlagCache; // entry used to cache SReadyFlagCounter values
+  uint8_t *targetBuf;         // target buffer to be shared 
   IncomingWorkItem incoming;
   OutgoingWorkItem outgoing;
 };
@@ -89,7 +90,7 @@ class GpuCommLib {
 
   static constexpr size_t s_defNumWorkItems = 8;
   static constexpr size_t s_numWorkThreads = 512;
-  static constexpr size_t s_numRegsPerThread = 24;
+  static constexpr size_t s_numRegsPerThread = 16;
 
   struct ThreadInfo {
     int gpuId;             // gpu ID assigned to this thread
@@ -168,6 +169,7 @@ public:
     w.ID = ID;
     w.nPeers = numSubscribedPeers, // usually we know how many peers are there
     w.dataOfs = 0,
+    w.readyFlagCache = 0,
     w.incoming = { // whom we are receiving from
           .peer = inPeer,
           .size = (uint32_t)inSize,
@@ -199,12 +201,13 @@ public:
     if(ID >= m_infos.size()) return QCCL_Result::InvalidParams;
     auto& info = m_infos[ID];
 
-    static int ii = 111; ii++;
+    static int ii = 1000;
     // here we are receiving from 'peerStart' and forwarding to 'peerEnd'
     auto& w = info.workItems.emplace_back();
-    w.ID = ID + ii;
+    w.ID = 1000+ID;
     w.nPeers = numSubscribedPeers,
     w.dataOfs = dataOfs,
+    w.readyFlagCache = 0,
     // exchange buf is always on the "other" side for gateway nodes
     // we read pointers from peerStart and peerEnd
     w.incoming = { // whom we are receiving from
@@ -291,13 +294,14 @@ extern uint __llvm_amdgcn_readfirstlane(uint) __asm("llvm.amdgcn.readfirstlane")
 //                                 index_t glc_slc) __asm("llvm.amdgcn.raw.buffer.load.i32");
 
 
-__forceinline__ __device__ void setupInPtrs(void *targetBuf) {
+__forceinline__ __device__ void setupInPtrs() {
 
   // we provide the sender our incoming buffer
   // NOTE adding GLOBAL here, inserts s_waitcnt vmcnt(7) after global stores!!!.
   // but why ???
   auto slot = (void *volatile *)ds_work.incoming.exchangeBuf;
   auto counter = (uint32_t GLOBAL *)(slot + SReadyFlagCounter);
+  auto targetBuf = ds_work.incoming.targetBuf;
 
   //! NOTE hangs here because we reset ready flag too fast (or too late)
   ds_work.readyFlagCache = ATOMIC_LOAD(counter);
@@ -337,27 +341,27 @@ __forceinline__ __device__ void setupGatewayPtrs() {
   }
   ds_work.outgoing.sourceBuf = (uint8_t *)(reinterpret_cast<uintptr_t>(ptr) ^ 
                                            reinterpret_cast<uintptr_t>(slot));
-  gprint("%d / %p: Received SRC buf: %p from peer %d", 
-            ds_work.ID, slot, ds_work.outgoing.sourceBuf, 
-                        ds_work.outgoing.peer);
+  // gprint("%d / %p: Received SRC buf: %p from peer %d", 
+  //           ds_work.ID, slot, ds_work.outgoing.sourceBuf, 
+  //                       ds_work.outgoing.peer);
 }
 
 __forceinline__ __device__ void setupOutPtrs() {
 
   auto& item = ds_work.outgoing;
   void *volatile *slot = item.exchangeBuf;
-  gprint("%d / %p: Starting receive target buf", ds_work.ID, slot);
+  // gprint("%d / %p: Starting receive target buf", ds_work.ID, slot);
 
   void *ptr;
   while (true) {
     ptr = (void *)ATOMIC_LOAD((uint64_t GLOBAL*)(slot + STargetBuf));
     if (ptr != nullptr) break;    
   }
-  ds_work.incoming.targetBuf = (uint8_t *)(reinterpret_cast<uintptr_t>(ptr) ^ 
+  ds_work.targetBuf = (uint8_t *)(reinterpret_cast<uintptr_t>(ptr) ^ 
                                            reinterpret_cast<uintptr_t>(slot));
-  gprint("%d / %p: Received target buf: %p from recv peer %d", 
-            ds_work.ID, slot, ds_work.incoming.targetBuf, 
-                                 ds_work.outgoing.peer);
+  // gprint("%d / %p: Received target buf: %p from recv peer %d", 
+  //           ds_work.ID, slot, ds_work.incoming.targetBuf, 
+  //                                ds_work.outgoing.peer);
 }
 
 __forceinline__ __device__ void resetBufferPtrs() 
@@ -368,7 +372,7 @@ __forceinline__ __device__ void resetBufferPtrs()
   auto val = 1 + atomicAdd(counter, 1);
 
   if(val % ds_work.nPeers == 0) {
-    gprint("%d: resetting buffers val = %d if zero", ds_work.ID, val);
+    // gprint("%d: resetting buffers val = %d if zero", ds_work.ID, val);
     ATOMIC_STORE(slot + STargetBuf, nullptr);
   }
 }
@@ -393,8 +397,8 @@ __forceinline__ __device__ void finalizeSendRecv(uint32_t tid) {
 
     uint32_t cacheVal = ds_work.readyFlagCache, 
             numPeers = ds_work.nPeers;
-    gprint("%d: Receiver waiting peer counter: %p / %d", 
-        ds_work.ID, readyCnt, readyCnt[0], cacheVal);
+    // gprint("%d: Receiver waiting peer counter: %p / %d", 
+    //     ds_work.ID, readyCnt, readyCnt[0], cacheVal);
 
     while(1) {
       auto val =  ATOMIC_LOAD(readyCnt);
@@ -415,7 +419,7 @@ void copyMainLoop(uint32_t ofs, const uint32_t niters, const uint32_t nwords) {
 
   const uint32_t dataOfs = ds_work.dataOfs;
   auto srcBuf = (const Word GLOBAL *)(ds_work.outgoing.sourceBuf + dataOfs);
-  auto targetBuf = (Word GLOBAL *)(ds_work.incoming.targetBuf + dataOfs);
+  auto targetBuf = (Word GLOBAL *)(ds_work.targetBuf + dataOfs);
 
   Word regs[NumRegs];
   for(uint32_t s = 0; s < niters; s++) {
@@ -453,16 +457,12 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
     ((uint64_t *)&ds_work)[tid] = d;
   }
   __syncthreads();
-  // target buffer is going to be overwritten
-  auto targetBuf = ds_work.incoming.targetBuf;
-
-  __syncthreads(); // need another sync here to avoid possible data race with another warp
 
   // we will use directWrite: that is, each sender writes data to receiver buffer directly
   // for that, receiver should provide sender the buffer address
   if(tid == 0) {
     if(ds_work.dataOfs == 0) { // normal nodes always start from 0
-      setupInPtrs(targetBuf); // share pointers from whom we are receiving
+      setupInPtrs(); // share pointers from whom we are receiving
     } else {
       setupGatewayPtrs();
     }
@@ -473,19 +473,25 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
 
   if(tid == 0) {
     resetBufferPtrs(); // when spinning is done, we reset buffer pointers
-    // gprint("============= %d: sourceBuf: %p, targetBuf: %p isGateway: %d", 
-    //   ds_work.ID, ds_work.outgoing.sourceBuf,
-    //   ds_work.incoming.targetBuf, isGateway);
+    gprint("============= %d: sourceBuf: %p, targetBuf: %p dataOfs: %d / %X size: %d / %X", 
+      ds_work.ID, ds_work.outgoing.sourceBuf,
+      ds_work.incoming.targetBuf, ds_work.dataOfs, ds_work.dataOfs,
+      ds_work.outgoing.size, ds_work.outgoing.size);
   }
-  if(ds_work.dataOfs != 0) {   // force quit gateway nodes earlier
-    //  finalizeSendRecv(tid);
-    //  return;
+#if 0
+  if(ds_work.dataOfs != 0 && ds_work.ID != 1001) {   // force quit gateway nodes earlier
+    finalizeSendRecv(tid);
+    return;
   }
+#endif
+
+  __syncthreads();
 
   using Word = uint64_t;
   const uint32_t bytes = ds_work.outgoing.size, 
                  nwords = bytes / sizeof(Word),
                  niters = nwords / (BlockSz * NumRegs);
+
 /*
 Speed with 24 regs / 512 threads
 Data size: 8.86 Mb; time elapsed: 0.307 ms, bandwidth: 30.245 Gb/s
@@ -508,10 +514,6 @@ Data size: 283.50 Mb; time elapsed: 8.474 ms, bandwidth: 35.082 Gb/s
                    wordsLeft = bytesLeft / sizeof(Word),
                    nwords64 = bytes / sizeof(Word);
 
-    if(wordsLeft >= bytesPerIter/2) {
-      // do one full iteration with reduced size
-    }
-
     if(tid == 0) {
       gprint("ID %d; nwords: %d; bytes: %d mod16: %d niters: %d "
              "bytesPerIter: %d bytesLeft: %d wordsLeft: %d words64: %d", 
@@ -527,7 +529,7 @@ Data size: 283.50 Mb; time elapsed: 8.474 ms, bandwidth: 35.082 Gb/s
     
     // the loop above covers bytes divisible by 16...
   }
-  __threadfence_system(); // TODO check if it's correct
+  __threadfence(); // TODO check if it's correct
   // NOTE: it could be that some channel is only sender or only receiver ??
   finalizeSendRecv(tid);
 }

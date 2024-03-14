@@ -16,12 +16,24 @@
 
 #define USE_CUSTOM_QCCL 1
 // whether to use light variant with just 3 GPUs for debugging extra peers
-#define USE_DEBUG_CONFIG_3_GPUS 1
+#define USE_DEBUG_CONFIG_3_GPUS 0
+// the number of GPUs communicating (set to -1 to use all available GPUs)
+#define NUM_ACTIVE_GPUS 8
 // if zero, all traffic is sent directly to target GPUs
 #define NUM_EXTRA_PEERS 0
 // this portion of traffic is sent to target GPUs directly (1: whole traffic)
-#define EXTRA_PEERS_SPLIT_FACTOR 1 
+#define EXTRA_PEERS_SPLIT_FACTOR 1
 #define VERIFY_DATA 1
+// run only one verify iteration and then quit
+#define STOP_AFTER_VERIFY 0
+
+#if 1
+#define NUM_ELEMS_MIN 2322432
+#define NUM_ELEMS_MAX 9289728*8
+#else
+#define NUM_ELEMS_MIN 1011*111
+#define NUM_ELEMS_MAX NUM_ELEMS_MIN
+#endif
 
 #if USE_DEBUG_CONFIG_3_GPUS && !USE_CUSTOM_QCCL
 #error Debug config only works for custom QCCL!
@@ -109,7 +121,8 @@ TestFramework::~TestFramework() {
 
 auto TestFramework::getElement(int device, size_t idx) -> T {
   //return static_cast<T>(100.0f*std::sin((float)idx*2*M_PI/(device+2)));
-  return static_cast<T>(device - 11111);
+  int ii = idx + 1;
+  return static_cast<T>(device + 11111 ^ (ii*ii*ii));
 }
 
 void TestFramework::fill_verify_data(int id) {
@@ -119,9 +132,10 @@ void TestFramework::fill_verify_data(int id) {
   auto& info = m_infos[id];
   CHK(cudaSetDevice(info.gpuId));
 
-  CHK(cudaMemsetAsync(info.sendBuf, s_fillValue ^ 0xFF, nBytes, info.stream));
+  auto fillVal = 0x80 + id; // s_fillValue
+  CHK(cudaMemsetAsync(info.sendBuf, fillVal ^ 0xFF, nBytes, info.stream));
   CHK(cudaMemsetAsync(info.sendBuf + m_curElems, s_oobValue ^ 0xFF, obytes, info.stream));
-  CHK(cudaMemsetAsync(info.recvBuf, s_fillValue, nBytes, info.stream));
+  CHK(cudaMemsetAsync(info.recvBuf, fillVal, nBytes, info.stream));
   CHK(cudaMemsetAsync(info.recvBuf + m_curElems, s_oobValue, obytes, info.stream));
 
   std::vector< T > refBuf(m_curElems);
@@ -188,14 +202,14 @@ void TestFramework::run_single_gpu(int id)
             outP, info.sendBuf, size));
       } else {
         CHKQCCL(qcclGatewaySend(id, numSubscribedPeers, inP, outP, 
-              m_offsets[i], size));
+              m_offsets[i]*sizeof(T), size));
       }
   } 
 #else
   uint32_t numSubscribedPeers = 2;
   // make sizes divisible by 4
   size_t size = m_curElems * sizeof(T),
-         sz1 = (size * 3 / 3 + 3) & ~3, 
+         sz1 = (size * 2 / 3 + 3) & ~3, 
          sz2 = (size - sz1);
 
   if(id == 0 || id == 1) {
@@ -263,8 +277,8 @@ void TestFramework::run(size_t numElems, int numIters, bool measureTime, bool ve
     PRINTZ("curElems: %u / 0x%lX", m_curElems, m_curElems);
   }
   for(uint32_t i = 0; i <= m_nExtraPeers && verifyData; i++) {
-    PRINTZ("%d: ofs: %lX; size: %lX; sum: %lX elems", 
-          i, m_offsets[i], m_sizes[i], m_offsets[i] + m_sizes[i]);
+    PRINTZ("%d: ofs: %ld/%lX; size: %ld/%lX; sum: 0x%lX elems", 
+          i, m_offsets[i], m_offsets[i], m_sizes[i], m_sizes[i], m_offsets[i] + m_sizes[i]);
   }
 #endif
   m_pool.runJob([&,this](int id) {
@@ -282,7 +296,7 @@ void TestFramework::run_thread(int id, int numIters, bool verifyData)
     //VLOG("\n============================ " << m_curElems << " =============================\n");
     run_single_gpu(id);
     CHK(cudaStreamSynchronize(info.stream));
-    //std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // std::this_thread::sleep_for(std::chrono::milliseconds(100));
   } // for
 
   auto tnow = std::chrono::high_resolution_clock::now();
@@ -310,9 +324,10 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
 {
   int nGpus = 0, nwarmups = 5, niters = 10;
   CHK(hipGetDeviceCount(&nGpus));
+#if !USE_DEBUG_CONFIG_3_GPUS
+  if(NUM_ACTIVE_GPUS > 0) nGpus = NUM_ACTIVE_GPUS;
+#else
   nGpus = 3;
-#if USE_DEBUG_CONFIG_3_GPUS  
-  if(nGpus != 3) throw std::runtime_error("Only 3 GPUs in debug variant!!");
 #endif  
   VLOG("Num devices: " << nGpus << "; max data size: " << 
       (double)(elemsMax*sizeof(TestFramework::T))/(1024*1024) << 
@@ -323,7 +338,7 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
       "RCCL"
 #endif
   );
-  std::vector< uint32_t > deviceAssignment{ 2, 3, 4 };
+  std::vector< uint32_t > deviceAssignment{ 1, 2, 3, 4, 5, 6, 7, 0 };
   if(nGpus > deviceAssignment.size()) {
     throw std::runtime_error("Invalid device assignment!");
   }
@@ -332,7 +347,9 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
 #if VERIFY_DATA
   obj.run(elemsMin, 1, false, true); // first run to verify data
 #endif
+#if STOP_AFTER_VERIFY
   return;
+#endif
 
   obj.run(elemsMax, (nwarmups+1)/2);
   obj.run(elemsMin, nwarmups/2);
@@ -361,9 +378,7 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
 int main() try 
 {
   DeviceInit(0);
-  //size_t sMin = 2322432, sMax = 9289728*8;
-  size_t sMin = 1011*111, sMax = sMin;
-  runRCCLTest(sMin, sMax);
+  runRCCLTest(NUM_ELEMS_MIN, NUM_ELEMS_MAX);
 }
 catch(std::exception& ex) {
   VLOG("Exception: " << ex.what());
