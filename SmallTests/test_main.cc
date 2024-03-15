@@ -8,22 +8,43 @@
 #include <numeric>
 #include <random>
 //#include "common/example_utils.hpp"
-#include<hip/hip_runtime.h>
+#include <hip/hip_runtime.h>
 
 #define VLOG(x) std::cerr << x
 
-__global__ void AtomicAddKernel(float *ptr, float *u)
-{
-  int thid = threadIdx.x;
-  atomicAdd(ptr + thid, u[0]);
-  __threadfence_system();
+#define CHK(x) if(auto res = (x); res != hipSuccess) { \
+  throw std::runtime_error(std::to_string(__LINE__) + " failed!"); \
 }
-
 
 int main() try 
 {
-   //DeviceInit();
-   AtomicAddKernel<<<1,256>>>((float *)&main, nullptr);
+  size_t bytes = 4*sizeof(float);
+  void *ptr0, *ptr1;
+  std::vector< float > vec1{41.0f,42.0f,43.0f,44.0f}, 
+        vec0(4, 0);
+
+  {
+    CHK(hipSetDevice(0));
+    CHK(hipDeviceEnablePeerAccess(1, 0));
+    CHK(hipMalloc(&ptr0, bytes));
+  }
+
+  {
+    CHK(hipSetDevice(1));
+    CHK(hipDeviceEnablePeerAccess(0, 0));
+    CHK(hipMalloc(&ptr1, bytes));
+    CHK(hipMemcpy(ptr1, vec1.data(), bytes, hipMemcpyHostToDevice));
+  }
+ 
+  // copy from dev1 to dev0
+  CHK(hipMemcpyPeer(ptr0, 0, ptr1, 1, bytes));
+  
+  CHK(hipSetDevice(1));  
+  CHK(hipMemcpy(vec0.data(), ptr0, bytes, hipMemcpyDeviceToHost));
+
+  for(auto v : vec0) {
+    VLOG("v = " << v << '\n');
+  }
 }
 catch(std::exception& ex) {
   VLOG("Exception: " << ex.what());
