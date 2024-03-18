@@ -50,6 +50,7 @@ void TestFramework::init_extra_peers() {
     auto t = m_commGraph[i][0].out; // target node for GPU i
     // iterate until all outgoing links for GPU i are filled
     VLOG("Examining " << i << " -> " << t);
+#if 1
     for(uint32_t jc = i + 1, n = 1; 
                          jc < 500 && n <= m_nExtraPeers; jc++) {
       uint32_t j = jc % m_nGpus; // sometimes we need 2 rounds
@@ -57,7 +58,6 @@ void TestFramework::init_extra_peers() {
       if(i == j || t == j || numLinks[j] > m_nExtraPeers) { 
         continue;
       }
-
       // graph[j][z] can include (i,t) if:
       // 1. there is no (i,t) in graph[j] - in that row
       // 2. i != j and t != j 
@@ -75,7 +75,17 @@ void TestFramework::init_extra_peers() {
       m_commGraph[j][z].in = i;  // node j receives z-th piece from node i
       m_commGraph[j][z].out = t; // node j forwards z-th piece to node t
     }
-  }
+#else
+    // alternative approach: use gateways living on target target nodes
+    // so that we have one direct write and one direct read kernel
+    if(m_nExtraPeers != 1) {
+      throw std::runtime_error("This approach works only for one peer!");
+    }
+    int z = 1;
+    m_commGraph[t][z].in = i;   // node t receives z-th piece from node i
+    m_commGraph[t][z].out = t;  // node t saves z-th piece to itself
+#endif
+  } // for i m_nGpus
   VLOG("Legend: GPU x send: (i,j): gpu[x] receives from gpu[i] and sends to gpu[j]");
   for(uint32_t i = 0; i < m_nGpus; i++) { 
     VLOG("GPU " << i << " send: " << m_commGraph.printRow(i));

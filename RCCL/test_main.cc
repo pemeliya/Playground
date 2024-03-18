@@ -16,7 +16,7 @@
 
 #define USE_CUSTOM_QCCL 1
 // whether to use light variant with just 3 GPUs for debugging extra peers
-#define USE_DEBUG_CONFIG_3_GPUS 1
+#define USE_DEBUG_CONFIG_3_GPUS 0
 // the number of GPUs communicating (set to -1 to use all available GPUs)
 #define NUM_ACTIVE_GPUS 8
 // if zero, all traffic is sent directly to target GPUs 
@@ -24,16 +24,16 @@
 #define NUM_EXTRA_PEERS 4
 // this portion of traffic is sent to target GPUs directly (1: whole traffic)
 // this has no effect if USE_CUSTOM_QCCL = 0
-#define EXTRA_PEERS_SPLIT_FACTOR 0.3
+#define EXTRA_PEERS_SPLIT_FACTOR 0.35
 #define VERIFY_DATA 1
 // run only one verify iteration and then quit
-#define STOP_AFTER_VERIFY 1
+#define STOP_AFTER_VERIFY 0
 
-#if 0
+#if 1
 #define NUM_ELEMS_MIN 2322432
 #define NUM_ELEMS_MAX 9289728*8
 #else
-#define NUM_ELEMS_MIN 1011*111+4
+#define NUM_ELEMS_MIN 1011*111
 #define NUM_ELEMS_MAX NUM_ELEMS_MIN
 #endif
 
@@ -214,7 +214,6 @@ void TestFramework::run_single_gpu(int id)
   } 
 #else
   uint32_t numSubscribedPeers = 2;
-  // make sizes divisible by 4
   size_t size = m_curElems * sizeof(T),
          sz1 = (size * 2/3) & ~3, 
          sz2 = (size - sz1);
@@ -222,15 +221,17 @@ void TestFramework::run_single_gpu(int id)
   if(id == 0 || id == 1) {
     // we send and receive to/from the same node (bidirectional)
     int sendP = 1 - id, recvP = 1 - id;
-    CHKQCCL(qcclSendRecv(id, numSubscribedPeers, recvP, info.recvBuf, sz1,
-          sendP, info.sendBuf, sz1));
+    // this is for testing unidirectional dataflow
+    auto ssend = id == 1 || true ? info.sendBuf : nullptr;
+    auto rrecv = id == 0 || true ? info.recvBuf : nullptr;
+    CHKQCCL(qcclSendRecv(id, numSubscribedPeers, recvP, rrecv, sz1,
+          sendP, ssend, sz1));
     // if(id == 0) {
     //   // make gateway nodes live on the same GPU as the main node..
     //   CHKQCCL(qcclGatewaySend(id, numSubscribedPeers, 0, 1, sz1, sz2));
     // } else {
     //   CHKQCCL(qcclGatewaySend(id, numSubscribedPeers, 1, 0, sz1, sz2));
     // }
-
   } else if(id == 2) {
     // create gateway peer
     CHKQCCL(qcclGatewaySend(id, numSubscribedPeers, 0, 1, sz1, sz2));

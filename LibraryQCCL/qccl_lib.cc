@@ -13,7 +13,7 @@
 #include "common/threading.hpp"
 #include "common/example_utils.hpp"
 
-#if 1
+#if 0
 #define gprint(fmt, ...) printf(fmt"\n", ##__VA_ARGS__)
 #else
 #define gprint(fmt, ...)
