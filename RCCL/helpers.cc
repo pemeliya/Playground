@@ -15,9 +15,9 @@ std::vector< uint32_t > TestFramework::permute_op()
     // this is cyclic neighbor exchange OP
     permute[i] = (i + 1) % m_nGpus; // defines to which node GPU[i] should send its data
   }
-#if 0
+#if 1
   std::random_device rd;
-  std::mt19937 g(rd());
+  std::mt19937 g(441); //g(rd());
   using Distr = std::uniform_int_distribution<uint32_t>;
   using PP = Distr::param_type;
   Distr D;
@@ -49,23 +49,31 @@ void TestFramework::init_extra_peers() {
 
     auto t = m_commGraph[i][0].out; // target node for GPU i
     // iterate until all outgoing links for GPU i are filled
+    VLOG("Examining " << i << " -> " << t);
     for(uint32_t jc = i + 1, n = 1; 
-                        jc <= i + m_nGpus && n <= m_nExtraPeers; jc++) {
-      uint32_t dj = jc - m_nGpus, j = (int)dj < 0 ? jc : dj;
+                         jc < 500 && n <= m_nExtraPeers; jc++) {
+      uint32_t j = jc % m_nGpus; // sometimes we need 2 rounds
       // skip self, the target node, and nodes with too many extra peers
       if(i == j || t == j || numLinks[j] > m_nExtraPeers) { 
         continue;
       }
-      n++; // increase the number of nodes processed
+
+      // graph[j][z] can include (i,t) if:
+      // 1. there is no (i,t) in graph[j] - in that row
+      // 2. i != j and t != j 
+
+      // NOTE: for N extra peers we need N rounds ??/
+      // check if this slot is empty
+      if(m_commGraph[j][n].in != s_bogus)
+        continue;
+      
+      VLOG("Found " << n << "th gateway " << i << "," << j << "," << t); 
+      // increase the number of nodes processed
       // use node j as a gateway to send data from i to t
-      auto z = numLinks[j]++;
+      auto z = n++;
+      numLinks[j]++;
       m_commGraph[j][z].in = i;  // node j receives z-th piece from node i
       m_commGraph[j][z].out = t; // node j forwards z-th piece to node t
-      //m_commGraph[i][z].out = j; // node i sends z-th piece to node j
-      //m_commGraph[j][z].in = i;  // node j receives z-th piece from node i
-      // node j now contains z-th piece from i to be forwarded to node t
-      ////m_stageB[j][z-1].out = t; // finally we want to send data to target
-      ////m_stageB[t][z-1].in = j;   // target receives this piece from j
     }
   }
   VLOG("Legend: GPU x send: (i,j): gpu[x] receives from gpu[i] and sends to gpu[j]");

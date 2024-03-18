@@ -13,7 +13,7 @@
 #include "common/threading.hpp"
 #include "common/example_utils.hpp"
 
-#if 0
+#if 1
 #define gprint(fmt, ...) printf(fmt"\n", ##__VA_ARGS__)
 #else
 #define gprint(fmt, ...)
@@ -204,7 +204,7 @@ public:
     static int ii = 1000;
     // here we are receiving from 'peerStart' and forwarding to 'peerEnd'
     auto& w = info.workItems.emplace_back();
-    w.ID = 1000+ID;
+    w.ID = 1000 + ID;
     w.nPeers = numSubscribedPeers,
     w.dataOfs = dataOfs,
     w.readyFlagCache = 0,
@@ -239,7 +239,7 @@ public:
     }
     uint32_t nBlocks = info.workItems.size();
     // VLOG(ID << ": workItemSz: " << sizeof(WorkInfo) << " running with #blocks:" 
-    //        << nBlocks);
+    //         << nBlocks);
     // NOTE: do we really need to copy workBuf all the time ???
     CHK(cudaMemcpyAsync(info.workBuf, info.workItems.data(), 
           sizeof(WorkInfo) * nBlocks, cudaMemcpyHostToDevice, stream));
@@ -358,7 +358,7 @@ __forceinline__ __device__ void setupOutPtrs() {
     if (ptr != nullptr) break;    
   }
   ds_work.targetBuf = (uint8_t *)(reinterpret_cast<uintptr_t>(ptr) ^ 
-                                           reinterpret_cast<uintptr_t>(slot));
+                                  reinterpret_cast<uintptr_t>(slot));
   // gprint("%d / %p: Received target buf: %p from recv peer %d", 
   //           ds_work.ID, slot, ds_work.incoming.targetBuf, 
   //                                ds_work.outgoing.peer);
@@ -389,8 +389,10 @@ __forceinline__ __device__ void finalizeSendRecv(uint32_t tid) {
     gprint("%d: incremented ready counter: %p / %d", 
             ds_work.ID, readyCnt, val);
 
-    // gateway nodes do not need to wait here
-  } else if(tid == warpSize && ds_work.dataOfs == 0) {
+    // gateway nodes do not need to wait here, also do not wait if
+    // target buffer is NULL (we do not receive anything)
+  } else if(tid == warpSize && ds_work.dataOfs == 0 && 
+            ds_work.incoming.targetBuf != nullptr) {
 
     auto slot = (void *GLOBAL *)ds_work.incoming.exchangeBuf;
     auto readyCnt = (uint32_t GLOBAL *)(slot + SReadyFlagCounter);
@@ -479,7 +481,7 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
       ds_work.outgoing.size, ds_work.outgoing.size);
   }
 #if 0
-  if(ds_work.dataOfs != 0 && ds_work.ID != 1001) {   // force quit gateway nodes earlier
+  if(ds_work.dataOfs != 0) {   // force quit gateway nodes earlier
     finalizeSendRecv(tid);
     return;
   }
@@ -487,50 +489,45 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
 
   __syncthreads();
 
-  using Word = uint64_t;
-  const uint32_t bytes = ds_work.outgoing.size, 
+  // check if this node sends anything..
+  if(ds_work.outgoing.sourceBuf != nullptr) 
+  {
+    using Word = uint64_t;
+    const uint32_t bytes = ds_work.outgoing.size, 
                  nwords = bytes / sizeof(Word),
                  niters = nwords / (BlockSz * NumRegs);
 
-/*
-Speed with 24 regs / 512 threads
-Data size: 8.86 Mb; time elapsed: 0.307 ms, bandwidth: 30.245 Gb/s
-Data size: 13.29 Mb; time elapsed: 0.434 ms, bandwidth: 32.139 Gb/s
-Data size: 19.93 Mb; time elapsed: 0.608 ms, bandwidth: 34.401 Gb/s
-Data size: 29.90 Mb; time elapsed: 0.878 ms, bandwidth: 35.701 Gb/s
-Data size: 44.85 Mb; time elapsed: 1.287 ms, bandwidth: 36.554 Gb/s
-Data size: 67.28 Mb; time elapsed: 1.905 ms, bandwidth: 37.038 Gb/s
-Data size: 100.91 Mb; time elapsed: 2.824 ms, bandwidth: 37.475 Gb/s
-Data size: 151.37 Mb; time elapsed: 4.226 ms, bandwidth: 37.562 Gb/s
-Data size: 227.06 Mb; time elapsed: 6.295 ms, bandwidth: 37.820 Gb/s
-Data size: 283.50 Mb; time elapsed: 8.474 ms, bandwidth: 35.082 Gb/s
-*/
-  copyMainLoop< Word, BlockSz, NumRegs, true, false >
+    copyMainLoop< Word, BlockSz, NumRegs, true, false >
                          (tid*2, niters, 0);
 
-  {
     constexpr uint32_t bytesPerIter = BlockSz*NumRegs*sizeof(Word);
     const uint32_t bytesLeft = bytes - niters*bytesPerIter,
-                   wordsLeft = bytesLeft / sizeof(Word),
-                   nwords64 = bytes / sizeof(Word);
+                   wordsLeft = bytesLeft / sizeof(Word);
 
     if(tid == 0) {
       gprint("ID %d; nwords: %d; bytes: %d mod16: %d niters: %d "
-             "bytesPerIter: %d bytesLeft: %d wordsLeft: %d words64: %d", 
+             "bytesPerIter: %d bytesLeft: %d wordsLeft: %d", 
             ds_work.ID, nwords, bytes, bytes%16, niters, bytesPerIter, 
-            bytesLeft, wordsLeft, nwords64);
+            bytesLeft, wordsLeft);
     }
     // we are left with at most BlockSz*NumRegs*sizeof(Word)/sizeof(uint32_t)
     // 32-bit words to process: 512*16*2 = 16384 words at most
     // nbytes divisible by 4 !!
     auto ofs = tid*2 + niters*bytesPerIter/sizeof(Word);
-    copyMainLoop< Word, BlockSz, NumRegs*2, false, true >
-                           (ofs, 1, nwords64);
-    
     // the loop above covers bytes divisible by 16...
+    copyMainLoop< Word, BlockSz, NumRegs*2, false, true >
+                           (ofs, 1, nwords);
+    
+    const uint32_t nbytes16 = bytes % 16;
+    if(tid < nbytes16 / 4) { // 12, 8 or 4 bytes left
+      const uint32_t dataOfs = ds_work.dataOfs + (bytes & ~15) + tid*4;
+      auto srcBuf = (const uint32_t GLOBAL *)(ds_work.outgoing.sourceBuf + dataOfs);
+      auto targetBuf = (uint32_t GLOBAL *)(ds_work.targetBuf + dataOfs);
+      auto val = LOAD(srcBuf);
+      STORE(val, targetBuf);
+    }
   }
   __threadfence(); // TODO check if it's correct
-  // NOTE: it could be that some channel is only sender or only receiver ??
   finalizeSendRecv(tid);
 }
 

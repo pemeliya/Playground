@@ -16,22 +16,24 @@
 
 #define USE_CUSTOM_QCCL 1
 // whether to use light variant with just 3 GPUs for debugging extra peers
-#define USE_DEBUG_CONFIG_3_GPUS 0
+#define USE_DEBUG_CONFIG_3_GPUS 1
 // the number of GPUs communicating (set to -1 to use all available GPUs)
 #define NUM_ACTIVE_GPUS 8
-// if zero, all traffic is sent directly to target GPUs
-#define NUM_EXTRA_PEERS 0
+// if zero, all traffic is sent directly to target GPUs 
+// this has no effect if USE_CUSTOM_QCCL = 0
+#define NUM_EXTRA_PEERS 4
 // this portion of traffic is sent to target GPUs directly (1: whole traffic)
-#define EXTRA_PEERS_SPLIT_FACTOR 1
+// this has no effect if USE_CUSTOM_QCCL = 0
+#define EXTRA_PEERS_SPLIT_FACTOR 0.3
 #define VERIFY_DATA 1
 // run only one verify iteration and then quit
-#define STOP_AFTER_VERIFY 0
+#define STOP_AFTER_VERIFY 1
 
-#if 1
+#if 0
 #define NUM_ELEMS_MIN 2322432
 #define NUM_ELEMS_MAX 9289728*8
 #else
-#define NUM_ELEMS_MIN 1011*111
+#define NUM_ELEMS_MIN 1011*111+4
 #define NUM_ELEMS_MAX NUM_ELEMS_MIN
 #endif
 
@@ -69,9 +71,12 @@ TestFramework::TestFramework(size_t nGpus, const uint32_t *gpuIDs,
       m_infos(nGpus), m_barrier(nGpus), m_pool(nGpus),
       m_commGraph(nGpus, m_nExtraPeers + 1, Node{s_bogus,s_bogus}) 
 { 
+#if !USE_DEBUG_CONFIG_3_GPUS
   if((m_nExtraPeers == 0 && m_splitFactor != 1.0) || m_nExtraPeers >= m_nGpus-1) {
+    VLOG("Wrong number of extra peers!");
     throw std::runtime_error("Wrong number of extra peers!");
   }
+#endif
 
 #if USE_CUSTOM_QCCL
   CHKQCCL(qcclInit(m_nGpus, gpuIDs));
@@ -104,7 +109,9 @@ TestFramework::TestFramework(size_t nGpus, const uint32_t *gpuIDs,
     CHKNCCL(ncclCommInitRank(&info.comm, m_nGpus, m_ncclId, id));
 #endif
   }); // runJob
+#if !USE_DEBUG_CONFIG_3_GPUS
   init_extra_peers();
+#endif  
   CHK(cudaDeviceSynchronize());
 }
 
@@ -209,7 +216,7 @@ void TestFramework::run_single_gpu(int id)
   uint32_t numSubscribedPeers = 2;
   // make sizes divisible by 4
   size_t size = m_curElems * sizeof(T),
-         sz1 = (size * 2 / 3 + 3) & ~3, 
+         sz1 = (size * 2/3) & ~3, 
          sz2 = (size - sz1);
 
   if(id == 0 || id == 1) {
@@ -217,6 +224,13 @@ void TestFramework::run_single_gpu(int id)
     int sendP = 1 - id, recvP = 1 - id;
     CHKQCCL(qcclSendRecv(id, numSubscribedPeers, recvP, info.recvBuf, sz1,
           sendP, info.sendBuf, sz1));
+    // if(id == 0) {
+    //   // make gateway nodes live on the same GPU as the main node..
+    //   CHKQCCL(qcclGatewaySend(id, numSubscribedPeers, 0, 1, sz1, sz2));
+    // } else {
+    //   CHKQCCL(qcclGatewaySend(id, numSubscribedPeers, 1, 0, sz1, sz2));
+    // }
+
   } else if(id == 2) {
     // create gateway peer
     CHKQCCL(qcclGatewaySend(id, numSubscribedPeers, 0, 1, sz1, sz2));
@@ -263,10 +277,10 @@ void TestFramework::run(size_t numElems, int numIters, bool measureTime, bool ve
   m_offsets.resize(m_nExtraPeers + 1);
   m_sizes.resize(m_nExtraPeers + 1);
   m_offsets[0] = 0;
-  m_sizes[0] = ((size_t)(m_curElems * m_splitFactor) + 3) & ~3;
+  m_sizes[0] = ((size_t)(m_curElems * m_splitFactor) + 15) & ~15;
   // remaining is to be split evenly between m_nExtraPeers
   size_t remaining = m_curElems - m_sizes[0], ofs = m_sizes[0],
-      step = m_nExtraPeers > 0 ? (remaining / m_nExtraPeers + 3) & ~3 : 0;
+      step = m_nExtraPeers > 0 ? (remaining / m_nExtraPeers + 15) & ~15 : 0;
   for(uint32_t i = 1; i <= m_nExtraPeers; i++, ofs += step) {
     m_offsets[i] = ofs;
     m_sizes[i] = step;
@@ -277,8 +291,9 @@ void TestFramework::run(size_t numElems, int numIters, bool measureTime, bool ve
     PRINTZ("curElems: %u / 0x%lX", m_curElems, m_curElems);
   }
   for(uint32_t i = 0; i <= m_nExtraPeers && verifyData; i++) {
-    PRINTZ("%d: ofs: %ld/%lX; size: %ld/%lX; sum: 0x%lX elems", 
-          i, m_offsets[i], m_offsets[i], m_sizes[i], m_sizes[i], m_offsets[i] + m_sizes[i]);
+    PRINTZ("%d: ofs: %ld/%lX mod16: %d; size: %ld/%lX; sum: 0x%lX elems", 
+          i, m_offsets[i], m_offsets[i], m_offsets[i] % 16,
+          m_sizes[i], m_sizes[i], m_offsets[i] + m_sizes[i]);
   }
 #endif
   m_pool.runJob([&,this](int id) {
@@ -322,7 +337,7 @@ void TestFramework::run_thread(int id, int numIters, bool verifyData)
 
 void runRCCLTest(size_t elemsMin, size_t elemsMax)
 {
-  int nGpus = 0, nwarmups = 5, niters = 10;
+  int nGpus = 0, nwarmups = 10, niters = 20;
   CHK(hipGetDeviceCount(&nGpus));
 #if !USE_DEBUG_CONFIG_3_GPUS
   if(NUM_ACTIVE_GPUS > 0) nGpus = NUM_ACTIVE_GPUS;
@@ -366,12 +381,22 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
   }
 #endif
 
+#if 0
   for(size_t sz = elemsMin; sz <= elemsMax; ) {
     obj.run(sz, niters, true);
     if(sz == elemsMax)
       break;
     sz = std::min(sz * 3 / 2, elemsMax);
   }
+#else
+  for(size_t sz = elemsMax; sz >= elemsMin; ) {
+    obj.run(sz, niters, true);
+    if(sz == elemsMin)
+      break;
+    sz = std::max(sz * 2 / 3, elemsMin);
+  }
+#endif
+
 }
 // NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,COLL
 
