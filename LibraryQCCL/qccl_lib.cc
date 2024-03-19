@@ -10,6 +10,7 @@
 #include <random>
 #include <thread>
 #include "qccl_lib.h"
+#include "buffer_addressing.hpp"
 #include "common/threading.hpp"
 #include "common/example_utils.hpp"
 
@@ -274,26 +275,6 @@ protected:
 
 __shared__ WorkInfo ds_work;
 
-// using index_t = int32_t;
-// typedef int32_t int32x4_t __attribute__((ext_vector_type(4)));
-// typedef float float2_t __attribute__((ext_vector_type(2)));
-
-// __device__ void __llvm_amdgcn_buffer_store_f32x2(float2_t vdata,
-//                                                  int32x4_t rsrc,
-//                                                  index_t vindex,
-//                                                  index_t offset,
-//                                                  bool glc,
-//                                                  bool slc) __asm("llvm.amdgcn.buffer.store.v2f32");
-
-extern uint __llvm_amdgcn_readfirstlane(uint) __asm("llvm.amdgcn.readfirstlane");
-
-// __device__ int32_t
-// llvm_amdgcn_raw_buffer_load_i32(int32x4_t srsrc,
-//                                 index_t voffset,
-//                                 index_t soffset,
-//                                 index_t glc_slc) __asm("llvm.amdgcn.raw.buffer.load.i32");
-
-
 __forceinline__ __device__ void setupInPtrs() {
 
   // we provide the sender our incoming buffer
@@ -414,14 +395,53 @@ __forceinline__ __device__ void finalizeSendRecv(uint32_t tid) {
   }
 }
 
+// __constant__ WorkInfo const_work[8];
+
 template < typename Word, uint32_t BlockSz, uint32_t NumRegs, 
-        bool UseOuterLoop, bool Check >
+        bool UseOuterLoop, bool Check, bool UseBufferISA = false >
 __forceinline__ __device__ 
 void copyMainLoop(uint32_t ofs, const uint32_t niters, const uint32_t nwords) {
 
-  const uint32_t dataOfs = ds_work.dataOfs;
-  auto srcBuf = (const Word GLOBAL *)(ds_work.outgoing.sourceBuf + dataOfs);
-  auto targetBuf = (Word GLOBAL *)(ds_work.targetBuf + dataOfs);
+  const auto& work = ds_work;//const_work[ds_work.ID];
+  const uint32_t dataOfs = work.dataOfs;
+  auto srcBuf = (const Word GLOBAL *)(work.outgoing.sourceBuf + dataOfs);
+  auto targetBuf = (Word GLOBAL *)(work.targetBuf + dataOfs);
+
+  if constexpr(UseBufferISA) {
+    // buffer load/stores perform range check automatically
+    const auto src_res = make_buffer_resource(work.outgoing.sourceBuf, 
+          work.outgoing.size + dataOfs);
+    const auto dst_res = make_buffer_resource(work.targetBuf, 
+          work.outgoing.size + dataOfs);
+
+    ofs = ofs*sizeof(Word) + dataOfs;
+    int32x4_t bregs[NumRegs/2];
+
+    for(uint32_t s = 0; s < niters; s++) {
+      // TODO: dataOfs can go into wave offset ??
+      auto src_ofs = ofs;
+      for(uint32_t i = 0; i < NumRegs/2; i++, src_ofs += BlockSz*2*sizeof(Word)) {
+        bregs[i] = 0;
+        if(!Check || 1) {
+          bregs[i] = amd_buffer_load(src_res, src_ofs, 0);
+        }
+      }
+      // if(UseOuterLoop && ds_work.ID == 0 && s == 1) {
+      //   union {
+      //     int32x4_t z;
+      //     struct { int32_t d[4]; };
+      //   } X = { .z = bregs[0] };
+      //   gprint("ofs: %d: %u %u %u %u", ofs, X.d[0], X.d[1], X.d[2], X.d[3]);
+      // }
+      for(uint32_t i = 0; i < NumRegs/2; i++, ofs += BlockSz*2*sizeof(Word)) {
+        if(!Check || 1) {
+          amd_buffer_store< BufCoherence::Def >(dst_res, ofs, 0, bregs[i]);
+        }
+      }
+      if(!UseOuterLoop) break;
+    }
+    return;
+  }
 
   Word regs[NumRegs];
   for(uint32_t s = 0; s < niters; s++) {
@@ -441,7 +461,7 @@ void copyMainLoop(uint32_t ofs, const uint32_t niters, const uint32_t nwords) {
       }
     }
     if(!UseOuterLoop) break;
-  } 
+  }
 }
 
 // there maybe many work items: one for each gpu block..
@@ -510,6 +530,7 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
             ds_work.ID, nwords, bytes, bytes%16, niters, bytesPerIter, 
             bytesLeft, wordsLeft);
     }
+
     // we are left with at most BlockSz*NumRegs*sizeof(Word)/sizeof(uint32_t)
     // 32-bit words to process: 512*16*2 = 16384 words at most
     // nbytes divisible by 4 !!
@@ -517,7 +538,7 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
     // the loop above covers bytes divisible by 16...
     copyMainLoop< Word, BlockSz, NumRegs*2, false, true >
                            (ofs, 1, nwords);
-    
+   
     const uint32_t nbytes16 = bytes % 16;
     if(tid < nbytes16 / 4) { // 12, 8 or 4 bytes left
       const uint32_t dataOfs = ds_work.dataOfs + (bytes & ~15) + tid*4;

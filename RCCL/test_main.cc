@@ -21,10 +21,10 @@
 #define NUM_ACTIVE_GPUS 8
 // if zero, all traffic is sent directly to target GPUs 
 // this has no effect if USE_CUSTOM_QCCL = 0
-#define NUM_EXTRA_PEERS 4
+#define NUM_EXTRA_PEERS 1
 // this portion of traffic is sent to target GPUs directly (1: whole traffic)
 // this has no effect if USE_CUSTOM_QCCL = 0
-#define EXTRA_PEERS_SPLIT_FACTOR 0.35
+#define EXTRA_PEERS_SPLIT_FACTOR 0.6
 #define VERIFY_DATA 1
 // run only one verify iteration and then quit
 #define STOP_AFTER_VERIFY 0
@@ -129,7 +129,8 @@ TestFramework::~TestFramework() {
 auto TestFramework::getElement(int device, size_t idx) -> T {
   //return static_cast<T>(100.0f*std::sin((float)idx*2*M_PI/(device+2)));
   int ii = idx + 1;
-  return static_cast<T>(device + 11111 ^ (ii*ii*ii));
+  //return static_cast<T>(device + 11111 ^ (ii*ii*ii));
+  return static_cast<T>(device + ii);
 }
 
 void TestFramework::fill_verify_data(int id) {
