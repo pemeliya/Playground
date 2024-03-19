@@ -15,7 +15,7 @@ std::vector< uint32_t > TestFramework::permute_op()
     // this is cyclic neighbor exchange OP
     permute[i] = (i + 1) % m_nGpus; // defines to which node GPU[i] should send its data
   }
-#if 1
+#if 0
   std::random_device rd;
   std::mt19937 g(441); //g(rd());
   using Distr = std::uniform_int_distribution<uint32_t>;
@@ -49,7 +49,7 @@ void TestFramework::init_extra_peers() {
 
     auto t = m_commGraph[i][0].out; // target node for GPU i
     // iterate until all outgoing links for GPU i are filled
-    VLOG("Examining " << i << " -> " << t);
+    // VLOG("Examining " << i << " -> " << t);
 #if 1
     for(uint32_t jc = i + 1, n = 1; 
                          jc < 500 && n <= m_nExtraPeers; jc++) {
@@ -67,7 +67,7 @@ void TestFramework::init_extra_peers() {
       if(m_commGraph[j][n].in != s_bogus)
         continue;
       
-      VLOG("Found " << n << "th gateway " << i << "," << j << "," << t); 
+      // VLOG("Found " << n << "th gateway " << i << "," << j << "," << t); 
       // increase the number of nodes processed
       // use node j as a gateway to send data from i to t
       auto z = n++;

@@ -421,7 +421,6 @@ void copyMainLoop(uint32_t ofs, const uint32_t niters, const uint32_t nwords) {
       // TODO: dataOfs can go into wave offset ??
       auto src_ofs = ofs;
       for(uint32_t i = 0; i < NumRegs/2; i++, src_ofs += BlockSz*2*sizeof(Word)) {
-        bregs[i] = 0;
         if(!Check || 1) {
           bregs[i] = amd_buffer_load(src_res, src_ofs, 0);
         }
