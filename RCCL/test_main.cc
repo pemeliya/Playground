@@ -33,7 +33,7 @@
 #define NUM_ELEMS_MIN 2322432
 #define NUM_ELEMS_MAX 9289728*8
 #else
-#define NUM_ELEMS_MIN 1011*111
+#define NUM_ELEMS_MIN 16384*10 + 32001 //1011*111
 #define NUM_ELEMS_MAX NUM_ELEMS_MIN
 #endif
 
@@ -42,7 +42,6 @@
 #endif
 
 #if 0
-Using device 0: AMD Instinct MI300X ( SM940, 304 SMs, 196148 free / 196592 total MB physmem, 2662.400 GB/s @ 1300000 kHz mem clock, ECC off)
 Num devices: 2; max data size: 283.5 Mb; neighbour exchange with RCCL
 Data size: 8.86 Mb; time elapsed: 0.493 ms, bandwidth: 18.847 Gb/s
 Data size: 13.29 Mb; time elapsed: 0.702 ms, bandwidth: 19.840 Gb/s
@@ -54,7 +53,6 @@ Data size: 100.91 Mb; time elapsed: 2.976 ms, bandwidth: 35.556 Gb/s
 Data size: 151.37 Mb; time elapsed: 4.422 ms, bandwidth: 35.892 Gb/s
 Data size: 227.06 Mb; time elapsed: 6.565 ms, bandwidth: 36.265 Gb/s
 Data size: 283.50 Mb; time elapsed: 8.175 ms, bandwidth: 36.365 Gb/s
-Thread pool joined
 #endif
 
 #define CHKNCCL(cmd) \
@@ -88,10 +86,6 @@ TestFramework::TestFramework(size_t nGpus, const uint32_t *gpuIDs,
     auto& info = m_infos[id];
     size_t obytes = s_redzoneElems*sizeof(T),
           nBytes = (m_maxElems + s_redzoneElems)*sizeof(T);
-    {
-      std::lock_guard _(m_verifyMtx);
-      VLOG("Allocating buffers and data init for GPU " << id);
-    }
     info.gpuId = gpuIDs != nullptr ? gpuIDs[id] : id;
     CHK(cudaSetDevice(info.gpuId));
     int flags = hipDeviceMallocDefault;

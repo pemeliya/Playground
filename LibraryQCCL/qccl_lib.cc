@@ -20,6 +20,8 @@
 #define gprint(fmt, ...)
 #endif
 
+// experimental feature to preload registers for the first iteration
+#define USE_PRELOAD_REGS 0
 #define GLOBAL __attribute__((address_space(1)))
 
 // NOTE: if data size is small, maybe makes sense to use just normal load/store?
@@ -361,7 +363,6 @@ __forceinline__ __device__ void resetBufferPtrs()
 __forceinline__ __device__ void finalizeSendRecv(uint32_t tid) {
 
   // auto tid = gpuLaneId();
-  
   if(tid == 0) {
     auto slot = (void *GLOBAL *)ds_work.outgoing.exchangeBuf;
     //  __atomic_store_n(send_done, 1, __ATOMIC_SEQ_CST);
@@ -397,10 +398,47 @@ __forceinline__ __device__ void finalizeSendRecv(uint32_t tid) {
 
 // __constant__ WorkInfo const_work[8];
 
+template < typename Word, uint32_t BlockSz, uint32_t NumRegs >
+__forceinline__ __device__ 
+void loadRegs(Word (&regs)[NumRegs], uint32_t src_ofs) {
+
+  const auto& work = ds_work;//const_work[ds_work.ID];
+  auto srcBuf = (const Word GLOBAL *)(work.outgoing.sourceBuf);
+  const uint32_t dataOfs = work.dataOfs;
+  // preloading is only possible for non-gateway blocks
+  if(!(srcBuf != nullptr && dataOfs == 0))
+    return;
+
+  #pragma unroll
+  for(uint32_t i = 0; i < NumRegs/2; i++, src_ofs += BlockSz*2) {
+    regs[2*i] = LOAD(srcBuf + src_ofs);
+    regs[2*i + 1] = LOAD(srcBuf + src_ofs + 1);
+  }
+}
+
+template < typename Word, uint32_t BlockSz, uint32_t NumRegs >
+__forceinline__ __device__ 
+void storeRegs(Word (&regs)[NumRegs], uint32_t ofs) {
+
+  const auto& work = ds_work;//const_work[ds_work.ID];
+  const uint32_t dataOfs = work.dataOfs;
+  auto srcBuf = (const Word GLOBAL *)(work.outgoing.sourceBuf);
+  auto targetBuf = (Word GLOBAL *)(work.targetBuf);
+
+  if(!(srcBuf != nullptr && dataOfs == 0))
+    return;
+
+  #pragma unroll
+  for(uint32_t i = 0; i < NumRegs/2; i++, ofs += BlockSz*2) {
+    STORE(regs[2*i], targetBuf + ofs);
+    STORE(regs[2*i + 1], targetBuf + ofs + 1);
+  }
+}
+
 template < typename Word, uint32_t BlockSz, uint32_t NumRegs, 
         bool UseOuterLoop, bool Check, bool UseBufferISA = false >
 __forceinline__ __device__ 
-void copyMainLoop(uint32_t ofs, const uint32_t niters, const uint32_t nwords) {
+void copyMainLoop(Word (&regs)[NumRegs], uint32_t ofs, const uint32_t niters, const uint32_t nwords) {
 
   const auto& work = ds_work;//const_work[ds_work.ID];
   const uint32_t dataOfs = work.dataOfs;
@@ -442,7 +480,6 @@ void copyMainLoop(uint32_t ofs, const uint32_t niters, const uint32_t nwords) {
     return;
   }
 
-  Word regs[NumRegs];
   for(uint32_t s = 0; s < niters; s++) {
     auto src_ofs = ofs;
 #pragma unroll
@@ -468,17 +505,23 @@ template < uint32_t BlockSz, uint32_t NumRegs >
 __launch_bounds__(BlockSz, 1)
 __global__ void rcclKernel(WorkInfo *gworkInfo) { 
 
+  using Word = uint64_t;
+  
   constexpr uint32_t s_num = sizeof(WorkInfo) / sizeof(uint64_t),
             warpSize = 64;
 
-  uint32_t tid = threadIdx.x;
+  const uint32_t tid = threadIdx.x;
+
   if(tid < s_num) {
     auto pblock = (uint64_t*)(gworkInfo + blockIdx.x);
     auto d = pblock[tid];
     ((uint64_t *)&ds_work)[tid] = d;
   }
   __syncthreads();
-
+#if USE_PRELOAD_REGS
+  Word regs[NumRegs];
+  loadRegs< Word, BlockSz, NumRegs >(regs, tid*2);
+#endif
   // we will use directWrite: that is, each sender writes data to receiver buffer directly
   // for that, receiver should provide sender the buffer address
   if(tid == 0) {
@@ -490,6 +533,7 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
   } else if(tid == warpSize) {
     setupOutPtrs(); // obtain pointers to whom we are sending
   }
+  // NOTE: this sync is needed in order to share output pointers
   __syncthreads();
 
   if(tid == 0) {
@@ -511,32 +555,38 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
   // check if this node sends anything..
   if(ds_work.outgoing.sourceBuf != nullptr) 
   {
-    using Word = uint64_t;
     const uint32_t bytes = ds_work.outgoing.size, 
                  nwords = bytes / sizeof(Word),
-                 niters = nwords / (BlockSz * NumRegs);
-
+                 totalIters = nwords / (BlockSz * NumRegs);
+    uint32_t ofs = tid*2, niters = totalIters;
+#if USE_PRELOAD_REGS
+    storeRegs< Word, BlockSz, NumRegs >(regs, ofs);
+    if(ds_work.dataOfs == 0) {// one less iteration for main nodes
+      ofs += BlockSz*NumRegs;
+      niters--;
+    }
+#else
+    Word regs[NumRegs];
+#endif
     copyMainLoop< Word, BlockSz, NumRegs, true, false >
-                         (tid*2, niters, 0);
+                         (regs, ofs, niters, 0);
 
     constexpr uint32_t bytesPerIter = BlockSz*NumRegs*sizeof(Word);
-    const uint32_t bytesLeft = bytes - niters*bytesPerIter,
+    const uint32_t bytesLeft = bytes - totalIters*bytesPerIter,
                    wordsLeft = bytesLeft / sizeof(Word);
 
     if(tid == 0) {
       gprint("ID %d; nwords: %d; bytes: %d mod16: %d niters: %d "
              "bytesPerIter: %d bytesLeft: %d wordsLeft: %d", 
-            ds_work.ID, nwords, bytes, bytes%16, niters, bytesPerIter, 
+            ds_work.ID, nwords, bytes, bytes%16, totalIters, bytesPerIter, 
             bytesLeft, wordsLeft);
     }
 
-    // we are left with at most BlockSz*NumRegs*sizeof(Word)/sizeof(uint32_t)
-    // 32-bit words to process: 512*16*2 = 16384 words at most
-    // nbytes divisible by 4 !!
-    auto ofs = tid*2 + niters*bytesPerIter/sizeof(Word);
+    // we are left with at most BlockSz*NumRegs
+    ofs += niters*BlockSz*NumRegs;
     // the loop above covers bytes divisible by 16...
-    copyMainLoop< Word, BlockSz, NumRegs*2, false, true >
-                           (ofs, 1, nwords);
+    copyMainLoop< Word, BlockSz, NumRegs, false, true >
+                           (regs, ofs, 1, nwords);
    
     const uint32_t nbytes16 = bytes % 16;
     if(tid < nbytes16 / 4) { // 12, 8 or 4 bytes left
