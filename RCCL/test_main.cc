@@ -14,22 +14,22 @@
 #include "test_main.h"
 #include "qccl_lib.h"
 
-#define USE_CUSTOM_QCCL 1
+#define USE_CUSTOM_QCCL 0
 // whether to use light variant with just 3 GPUs for debugging extra peers
 #define USE_DEBUG_CONFIG_3_GPUS 0
 // the number of GPUs communicating (set to -1 to use all available GPUs)
 #define NUM_ACTIVE_GPUS 8
 // if zero, all traffic is sent directly to target GPUs 
 // this has no effect if USE_CUSTOM_QCCL = 0
-#define NUM_EXTRA_PEERS 5
+#define NUM_EXTRA_PEERS 1
 // this portion of traffic is sent to target GPUs directly (1: whole traffic)
 // this has no effect if USE_CUSTOM_QCCL = 0
-#define EXTRA_PEERS_SPLIT_FACTOR 0.33
+#define EXTRA_PEERS_SPLIT_FACTOR 0.7
 #define VERIFY_DATA 1
 // run only one verify iteration and then quit
-#define STOP_AFTER_VERIFY 0
+#define STOP_AFTER_VERIFY 1
 
-#if 1
+#if 0
 #define NUM_ELEMS_MIN 2322432
 #define NUM_ELEMS_MAX 9289728*8
 #else
@@ -70,10 +70,11 @@ TestFramework::TestFramework(size_t nGpus, const uint32_t *gpuIDs,
       m_commGraph(nGpus, m_nExtraPeers + 1, Node{s_bogus,s_bogus}) 
 { 
 #if !USE_DEBUG_CONFIG_3_GPUS
-  if((m_nExtraPeers == 0 && m_splitFactor != 1.0) || m_nExtraPeers >= m_nGpus-1) {
+  if(m_nExtraPeers >= m_nGpus-1) {
     VLOG("Wrong number of extra peers!");
     throw std::runtime_error("Wrong number of extra peers!");
   }
+  if(m_nExtraPeers == 0) m_splitFactor = 1.0; 
 #endif
 
 #if USE_CUSTOM_QCCL
@@ -198,19 +199,19 @@ void TestFramework::run_single_gpu(int id)
   uint32_t numSubscribedPeers = 1 + m_nExtraPeers;
   for(int i = 0; i <= m_nExtraPeers; i++) {
       int inP = V[i].in, outP = V[i].out;
-      auto size = m_sizes[i] * sizeof(T);
+      auto size = m_sizes[i];
       if(i == 0) {
         CHKQCCL(qcclSendRecv(id, numSubscribedPeers, inP, info.recvBuf, size,
             outP, info.sendBuf, size));
       } else {
         CHKQCCL(qcclGatewaySend(id, numSubscribedPeers, inP, outP, 
-              m_offsets[i]*sizeof(T), size));
+              m_offsets[i], size));
       }
   } 
 #else
-  uint32_t numSubscribedPeers = 2;
+  uint32_t numSubscribedPeers = 1;
   size_t size = m_curElems * sizeof(T),
-         sz1 = (size * 2/3) & ~3, 
+         sz1 = (size * 3/3) & ~15, 
          sz2 = (size - sz1);
 
   if(id == 0 || id == 1) {
@@ -229,8 +230,8 @@ void TestFramework::run_single_gpu(int id)
     // }
   } else if(id == 2) {
     // create gateway peer
-    CHKQCCL(qcclGatewaySend(id, numSubscribedPeers, 0, 1, sz1, sz2));
-    CHKQCCL(qcclGatewaySend(id, numSubscribedPeers, 1, 0, sz1, sz2));
+    // CHKQCCL(qcclGatewaySend(id, numSubscribedPeers, 0, 1, sz1, sz2));
+    // CHKQCCL(qcclGatewaySend(id, numSubscribedPeers, 1, 0, sz1, sz2));
   }
 #endif
   CHKQCCL(qcclRun(id, info.stream));
@@ -273,21 +274,23 @@ void TestFramework::run(size_t numElems, int numIters, bool measureTime, bool ve
   m_offsets.resize(m_nExtraPeers + 1);
   m_sizes.resize(m_nExtraPeers + 1);
   m_offsets[0] = 0;
-  m_sizes[0] = ((size_t)(m_curElems * m_splitFactor) + 15) & ~15;
+  size_t total = m_curElems * sizeof(T);
+  m_sizes[0] = (size_t)(total * m_splitFactor) & ~15;
   // remaining is to be split evenly between m_nExtraPeers
-  size_t remaining = m_curElems - m_sizes[0], ofs = m_sizes[0],
-      step = m_nExtraPeers > 0 ? (remaining / m_nExtraPeers + 15) & ~15 : 0;
+  size_t remaining = total - m_sizes[0], ofs = m_sizes[0],
+      step = m_nExtraPeers > 0 ? (remaining / m_nExtraPeers) & ~15 : 0;
   for(uint32_t i = 1; i <= m_nExtraPeers; i++, ofs += step) {
     m_offsets[i] = ofs;
     m_sizes[i] = step;
   }
-  m_sizes[m_nExtraPeers] = m_curElems - m_offsets[m_nExtraPeers];
+  m_sizes[m_nExtraPeers] = total - m_offsets[m_nExtraPeers];
 #if !USE_DEBUG_CONFIG_3_GPUS // this is not relevant for debug config
   if(verifyData) {
-    PRINTZ("curElems: %u / 0x%lX", m_curElems, m_curElems);
+    PRINTZ("curElems: %u / 0x%lX (%u / %lX bytes)", 
+          m_curElems, m_curElems, total, total);
   }
   for(uint32_t i = 0; i <= m_nExtraPeers && verifyData; i++) {
-    PRINTZ("%d: ofs: %ld/%lX mod16: %d; size: %ld/%lX; sum: 0x%lX elems", 
+    PRINTZ("%d: ofs: %ld/%lX mod16: %d; size: %ld/%lX; sum: 0x%lX bytes", 
           i, m_offsets[i], m_offsets[i], m_offsets[i] % 16,
           m_sizes[i], m_sizes[i], m_offsets[i] + m_sizes[i]);
   }
@@ -377,7 +380,7 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
   }
 #endif
 
-#if 0
+#if 1
   for(size_t sz = elemsMin; sz <= elemsMax; ) {
     obj.run(sz, niters, true);
     if(sz == elemsMax)

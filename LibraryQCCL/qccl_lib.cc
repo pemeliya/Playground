@@ -14,12 +14,17 @@
 #include "common/threading.hpp"
 #include "common/example_utils.hpp"
 
+// AMDGPU docs https://llvm.org/docs/AMDGPU/
+
 #if 0
 #define gprint(fmt, ...) printf(fmt"\n", ##__VA_ARGS__)
 #else
 #define gprint(fmt, ...)
 #endif
 
+#define USE_CONSTANT_MEM 0
+#define USE_BUFFER_LOADS 1
+#define MAX_NUM_NODES 16
 // experimental feature to preload registers for the first iteration
 #define USE_PRELOAD_REGS 0
 #define GLOBAL __attribute__((address_space(1)))
@@ -269,13 +274,19 @@ protected:
   QCCL_Result allocWorkBuf(ThreadInfo *pinfo, size_t num) {
     pinfo->numDevWorkItems = num;
     auto bytes = sizeof(WorkInfo) * num;
-    CHK(hipExtMallocWithFlags((void **)&pinfo->workBuf, bytes, hipDeviceMallocDefault));
+    CHK(hipExtMallocWithFlags((void **)&pinfo->workBuf, bytes, 
+          hipDeviceMallocFinegrained));
     return QCCL_Result::OK;
   }
 
 }; // GpuCommLib
 
+#if !USE_CONSTANT_MEM
 __shared__ WorkInfo ds_work;
+//#define WORK(x) 
+#else
+__constant__ WorkInfo ds_work[MAX_NUM_NODES];
+#endif
 
 __forceinline__ __device__ void setupInPtrs() {
 
@@ -372,8 +383,8 @@ __forceinline__ __device__ void finalizeSendRecv(uint32_t tid) {
             ds_work.ID, readyCnt, val);
 
     // gateway nodes do not need to wait here, also do not wait if
-    // target buffer is NULL (we do not receive anything)
-  } else if(tid == warpSize && ds_work.dataOfs == 0 && 
+    // target buffer is NULL (we do not receive anything) 
+  } else if(tid / warpSize == 1 && ds_work.dataOfs == 0 && 
             ds_work.incoming.targetBuf != nullptr) {
 
     auto slot = (void *GLOBAL *)ds_work.incoming.exchangeBuf;
@@ -383,20 +394,20 @@ __forceinline__ __device__ void finalizeSendRecv(uint32_t tid) {
             numPeers = ds_work.nPeers;
     // gprint("%d: Receiver waiting peer counter: %p / %d", 
     //     ds_work.ID, readyCnt, readyCnt[0], cacheVal);
-
+    // bool sleeping = false;
     while(1) {
+      //__builtin_amdgcn_s_sleep(1);
       auto val =  ATOMIC_LOAD(readyCnt);
       if(val - cacheVal == numPeers) {
         gprint("%d: Waiting done: counter: %d, cacheVal: %d", 
             ds_work.ID, val, cacheVal);
         break;
       }
-      // __builtin_amdgcn_s_sleep(1);
     }
+    // this causes the program to crash
+    // __asm__ __volatile__("s_wakeup");
   }
 }
-
-// __constant__ WorkInfo const_work[8];
 
 template < typename Word, uint32_t BlockSz, uint32_t NumRegs >
 __forceinline__ __device__ 
@@ -435,50 +446,121 @@ void storeRegs(Word (&regs)[NumRegs], uint32_t ofs) {
   }
 }
 
+__constant__ WorkInfo const_work[MAX_NUM_NODES];
+
 template < typename Word, uint32_t BlockSz, uint32_t NumRegs, 
-        bool UseOuterLoop, bool Check, bool UseBufferISA = false >
+        bool UseOuterLoop, bool Check >
 __forceinline__ __device__ 
 void copyMainLoop(Word (&regs)[NumRegs], uint32_t ofs, const uint32_t niters, const uint32_t nwords) {
 
-  const auto& work = ds_work;//const_work[ds_work.ID];
+  const auto& work = ds_work; //const_work[ds_work.ID];
   const uint32_t dataOfs = work.dataOfs;
   auto srcBuf = (const Word GLOBAL *)(work.outgoing.sourceBuf + dataOfs);
   auto targetBuf = (Word GLOBAL *)(work.targetBuf + dataOfs);
 
-  if constexpr(UseBufferISA) {
-    // buffer load/stores perform range check automatically
-    const auto src_res = make_buffer_resource(work.outgoing.sourceBuf, 
-          work.outgoing.size + dataOfs);
-    const auto dst_res = make_buffer_resource(work.targetBuf, 
-          work.outgoing.size + dataOfs);
+#if USE_BUFFER_LOADS
+  // buffer load/stores perform range check automatically
+  const auto src_res = make_buffer_resource(work.outgoing.sourceBuf, 
+        work.outgoing.size + dataOfs);
+  const auto dst_res = make_buffer_resource(work.targetBuf, 
+        work.outgoing.size + dataOfs);
 
-    ofs = ofs*sizeof(Word) + dataOfs;
-    int32x4_t bregs[NumRegs/2];
+  int32x4_t bregs[NumRegs/2];
 
-    for(uint32_t s = 0; s < niters; s++) {
+  union Split64 {
+    void *ptr;
+    struct {
+      uint32_t lo;
+      uint32_t hi;
+    };
+  };
+/*
+__device__ void
+llvm_amdgcn_raw_buffer_store_i32x4(int32x4_t vdata,
+                                   int32x4_t rsrc,
+                                   index_t voffset,
+                                   index_t soffset,
+                                   index_t glc_slc) __asm("llvm.amdgcn.raw.buffer.store.v4i32");
+
+__device__ int32x4_t
+llvm_amdgcn_raw_buffer_load_i32x4(int32x4_t srsrc,
+                                  index_t voffset,
+                                  index_t soffset,
+                                  index_t glc_slc) __asm("llvm.amdgcn.raw.buffer.load.v4i32");
+
+{
+    union {
+        int32x4_t content;
+        struct {
+            void *address;
+            int32_t range;
+            int32_t config;
+        };
+    } S = {
+        .address = (void *)p_wave,
+        .range = space_size,
+        .config = CK_BUFFER_RESOURCE_3RD_DWORD,
+    };
+    return S.content;
+*/    
+
+#define BUFFFER_LOADx4(result, sreg, vofs) \
+    asm volatile("buffer_load_dwordx4 %0, %1, s[" #sreg ":" #sreg "+3], 0 offen" \
+          : "=v"(result) : "v"(vofs), "0"(result))
+
+    // printf("range: %d ofs: %d\n", work.outgoing.size,
+    //     dataOfs);
+
+    for(uint32_t s = 0; s < niters; s++) 
+    {
       // TODO: dataOfs can go into wave offset ??
       auto src_ofs = ofs;
-      for(uint32_t i = 0; i < NumRegs/2; i++, src_ofs += BlockSz*2*sizeof(Word)) {
-        if(!Check || 1) {
-          bregs[i] = amd_buffer_load(src_res, src_ofs, 0);
-        }
+#pragma unroll
+      for(uint32_t i = 0; i < NumRegs/2; i++, src_ofs += BlockSz*2) {
+#if 1
+          Split64 V = { .ptr = work.outgoing.sourceBuf + dataOfs };
+          const uint32_t range = work.outgoing.size + dataOfs;
+          const uint32_t config = CK_BUFFER_RESOURCE_3RD_DWORD;
+          asm volatile(R"(
+          v_readfirstlane_b32 s4, %0
+          v_readfirstlane_b32 s5, %1
+          v_readfirstlane_b32 s6, %2
+          v_readfirstlane_b32 s7, %3
+          s_nop 0)"
+                : 
+                : "v"(V.lo),      // 0
+                  "v"(V.hi),
+                  "v"(range), // 1
+                  "v"(config)  // 2
+                );
+          const uint32_t bofs = src_ofs*sizeof(Word);
+          BUFFFER_LOADx4(bregs[i], 4, bofs);
+#else
+          bregs[i] = amd_buffer_load(src_res, src_ofs*sizeof(Word), 0);
+#endif
       }
       // if(UseOuterLoop && ds_work.ID == 0 && s == 1) {
-      //   union {
-      //     int32x4_t z;
-      //     struct { int32_t d[4]; };
-      //   } X = { .z = bregs[0] };
+
       //   gprint("ofs: %d: %u %u %u %u", ofs, X.d[0], X.d[1], X.d[2], X.d[3]);
       // }
-      for(uint32_t i = 0; i < NumRegs/2; i++, ofs += BlockSz*2*sizeof(Word)) {
-        if(!Check || 1) {
-          amd_buffer_store< BufCoherence::Def >(dst_res, ofs, 0, bregs[i]);
+      uint32_t tid = threadIdx.x;
+#pragma unroll
+      for(uint32_t i = 0; i < NumRegs/2; i++, ofs += BlockSz*2) {
+        union {
+          int32x4_t z;
+          struct { int64_t d[2]; };
+        } X = { .z = bregs[i] };
+       // STORE(X.d[0], targetBuf );
+        if(tid >= 511) {
+          //printf("%d/%d: ofs: %d size: %d\n", s, i, ofs*sizeof(Word), work.outgoing.size);
         }
+        // STORE(X.d[1], targetBuf  + 1);
+       amd_buffer_store< BufCoherence::Def >(dst_res, ofs*sizeof(Word), 0, bregs[i]);
       }
-      if(!UseOuterLoop) break;
-    }
-    return;
-  }
+      //if(!UseOuterLoop) 
+      break;
+    } // for s
+#else // USE_BUFFER_LOADS
 
   for(uint32_t s = 0; s < niters; s++) {
     auto src_ofs = ofs;
@@ -498,6 +580,7 @@ void copyMainLoop(Word (&regs)[NumRegs], uint32_t ofs, const uint32_t niters, co
     }
     if(!UseOuterLoop) break;
   }
+#endif // USE_BUFFER_LOADS
 }
 
 // there maybe many work items: one for each gpu block..
@@ -585,8 +668,8 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
     // we are left with at most BlockSz*NumRegs
     ofs += niters*BlockSz*NumRegs;
     // the loop above covers bytes divisible by 16...
-    copyMainLoop< Word, BlockSz, NumRegs, false, true >
-                           (regs, ofs, 1, nwords);
+    // copyMainLoop< Word, BlockSz, NumRegs, false, true >
+    //                        (regs, ofs, 1, nwords);
    
     const uint32_t nbytes16 = bytes % 16;
     if(tid < nbytes16 / 4) { // 12, 8 or 4 bytes left
