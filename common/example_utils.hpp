@@ -123,8 +123,15 @@ struct HVector : std::vector< NT > {
        CHK(cudaMalloc((void**)&devPtr, Base::size()*sizeof(NT)))
    }
 
+   HVector() = default;
+
    HVector(const HVector&) = delete;
    HVector& operator=(const HVector&) = delete;
+
+   void swap(HVector& lhs) {
+    std::swap(devPtr, lhs.devPtr);
+    this->swap(lhs);
+   }
 
    HVector(std::initializer_list< NT > l) : Base(l) {
        CHK(cudaMalloc((void**)&devPtr, l.size()*sizeof(NT)))

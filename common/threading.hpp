@@ -98,10 +98,12 @@ struct ThreadPool {
 
 private:
 
-  void threadFunc(int id) try {
+  void threadFunc(int id) 
+  {
     m_isRunning = true;
     uint32_t localJobId = 0;
     while(m_isRunning) 
+    try
     {
       // VLOG("My job ID: " << localJobId);
       {
@@ -120,12 +122,12 @@ private:
         m_finishedCv.notify_one(); // last thread notifies about finished job
       }
     }
-  }
-  catch(std::exception& ex) {
-    VLOG("Thread exception: " << ex.what());
-    m_isRunning = false, m_threadException = true;
-    m_jobCv.notify_all();
-    m_finishedCv.notify_one();
+    catch(std::exception& ex) {
+      VLOG("Thread exception: " << ex.what());
+      m_isRunning = false, m_threadException = true;
+      m_jobCv.notify_all();
+      m_finishedCv.notify_one();
+    }
   }
 
   uint32_t m_currentJobID = 0, m_arrived = 0;
