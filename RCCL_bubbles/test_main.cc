@@ -179,7 +179,7 @@ void TestFramework::init_gemm_op(int id) {
        transB = rocblas_operation_none;
 
   int64_t batchCount = 1000;
-  gemm.init();
+  gemm.init(m_infos[id].stream);
   gemm.FillParams(M, N, K, transA, transB, batchCount);
   gemm.AllocBuffers();
 }
@@ -187,7 +187,7 @@ void TestFramework::init_gemm_op(int id) {
 void TestFramework::run_gemm_op(int id, int nIters) {
   
   auto& info = m_infos[id];
-  info.gemm.run(nIters, info.stream);
+  info.gemm.run(nIters);
 }
 
 void TestFramework::run_thread(int id, int numIters, bool verifyData) 

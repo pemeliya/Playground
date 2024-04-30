@@ -50,9 +50,10 @@ struct BlasGemm
 
   BlasGemm() = default;
 
-  void init() {
+  void init(cudaStream_t stream) {
     CHK_ROCBLAS(rocblas_create_handle(&handle_));
     CHK_ROCBLAS(rocblas_set_pointer_mode(handle_, rocblas_pointer_mode_host))
+    CHK_ROCBLAS(rocblas_set_stream(handle_, stream));
   }
 
   ~BlasGemm() {
@@ -164,9 +165,8 @@ struct BlasGemm
            cfg_.solutionIndex, cfg_.flags))
   }
 
-  void run(int n_times, cudaStream_t stream) {
+  void run(int n_times) {
 
-    CHK_ROCBLAS(rocblas_set_stream(handle_, stream));
     TypeD alpha{1}, beta{0};
     for(int i = 0; i < n_times; i++) {
       if(cfg_.batchCount == 1) {
