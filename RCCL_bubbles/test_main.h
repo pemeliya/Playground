@@ -196,6 +196,9 @@ public:
   struct ThreadInfo {
     int gpuId;            // gpu ID assigned to this thread
     cudaStream_t stream; // associated streams
+    cudaGraph_t graph;
+    cudaGraphExec_t graphExec;
+    bool graphCreated;
     T *sendBuf, *recvBuf; // send and receive buffers
     ncclComm_t comm;      // NCCL handle
     BlasGemm gemm;        // gemm op handle

@@ -229,6 +229,7 @@ int WriteBufferRecords(const rocprofiler_record_header_t* begin,
 RocProfilerSession::RocProfilerSession() {
 
   int counter_option = 0;
+#if 0  
      // Initialize the tools
   CHECK_ROCPROFILER(rocprofiler_initialize());
 
@@ -270,15 +271,22 @@ RocProfilerSession::RocProfilerSession() {
       rocprofiler_filter_data_t{.counters_sampler_parameters = cs_parameters}, 0, &filter_id,
       property));
   CHECK_ROCPROFILER(rocprofiler_set_filter_buffer(session_id, filter_id, buffer_id));
+#else
+// Initialize the tools
+  CHECK_ROCPROFILER(rocprofiler_initialize());
 
-  //   std::vector<const char*> counters;
-  // counters.emplace_back("GRBM_COUNT");
-  // CHECK_ROCPROFILER(
-  //     rocprofiler_create_filter(session_id, ROCPROFILER_COUNTERS_COLLECTION,
-  //                               rocprofiler_filter_data_t{.counters_names = &counters[0]},
-  //                               counters.size(), &filter_id, property));
-  // CHECK_ROCPROFILER(rocprofiler_set_filter_buffer(session_id, filter_id, buffer_id));
+  // Creating the session with given replay mode
+  CHECK_ROCPROFILER(rocprofiler_create_session(ROCPROFILER_NONE_REPLAY_MODE, &session_id));
 
+  // Creating Output Buffer for the data
+  rocprofiler_buffer_id_t buffer_id;
+  CHECK_ROCPROFILER(rocprofiler_create_buffer(
+      session_id,
+      [](const rocprofiler_record_header_t* record, const rocprofiler_record_header_t* end_record,
+         rocprofiler_session_id_t session_id, rocprofiler_buffer_id_t buffer_id) {
+        WriteBufferRecords(record, end_record, session_id, buffer_id);
+      },
+      0x9999, &buffer_id));
 
   // Tracing Filter
   // std::vector<rocprofiler_tracer_activity_domain_t> apis_requested;
@@ -292,13 +300,19 @@ RocProfilerSession::RocProfilerSession() {
   //     session_id, ROCPROFILER_API_TRACE, rocprofiler_filter_data_t{&apis_requested[0]},
   //     apis_requested.size(), &api_tracing_filter_id, rocprofiler_filter_property_t{}));
   // CHECK_ROCPROFILER(rocprofiler_set_filter_buffer(session_id, api_tracing_filter_id, buffer_id));
+  // CHECK_ROCPROFILER(rocprofiler_set_api_trace_sync_callback(
+  //     session_id, api_tracing_filter_id,
+  //     [](rocprofiler_record_tracer_t record, rocprofiler_session_id_t session_id) {
+  //       FlushTracerRecord(record, session_id);
+  //     }));
 
   // Kernel Tracing
-  // rocprofiler_filter_id_t kernel_tracing_filter_id;
-  // CHECK_ROCPROFILER(rocprofiler_create_filter(
-  //     session_id, ROCPROFILER_DISPATCH_TIMESTAMPS_COLLECTION, rocprofiler_filter_data_t{}, 0,
-  //     &kernel_tracing_filter_id, rocprofiler_filter_property_t{}));
-  // CHECK_ROCPROFILER(rocprofiler_set_filter_buffer(session_id, kernel_tracing_filter_id, buffer_id));
+  rocprofiler_filter_id_t kernel_tracing_filter_id;
+  CHECK_ROCPROFILER(rocprofiler_create_filter(
+      session_id, ROCPROFILER_DISPATCH_TIMESTAMPS_COLLECTION, rocprofiler_filter_data_t{}, 0,
+      &kernel_tracing_filter_id, rocprofiler_filter_property_t{}));
+  CHECK_ROCPROFILER(rocprofiler_set_filter_buffer(session_id, kernel_tracing_filter_id, buffer_id));
+#endif
 
 }
 

@@ -46,6 +46,17 @@
 #define cudaStreamCreateWithPriority hipStreamCreateWithPriority
 #define cudaStreamNonBlocking hipStreamNonBlocking
 #define cudaStreamDestroy hipStreamDestroy
+#define cudaStreamBeginCapture hipStreamBeginCapture
+#define cudaStreamEndCapture hipStreamEndCapture
+
+#define cudaStreamCaptureModeThreadLocal hipStreamCaptureModeThreadLocal
+#define cudaGraph_t hipGraph_t
+#define cudaGraphExec_t hipGraphExec_t
+#define cudaGraphInstantiate hipGraphInstantiate
+#define cudaGraphLaunch hipGraphLaunch
+#define cudaGraphExecDestroy hipGraphExecDestroy
+#define cudaGraphDestroy hipGraphDestroy
+
 #define cudaEventCreate hipEventCreate
 #define cudaEventDestroy hipEventDestroy
 #define cudaEventRecord hipEventRecord

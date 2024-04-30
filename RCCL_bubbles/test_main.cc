@@ -12,14 +12,11 @@
 #include "test_main.h"
 
 // the number of GPUs communicating (set to -1 to use all available GPUs)
-#define NUM_ACTIVE_GPUS 8
+#define NUM_ACTIVE_GPUS 2
 #define VERIFY_DATA 0
+#define USE_GRAPH_API 1
 
-#define TEST_COLLECTIVE_PERMUTE 0
-#define TEST_ALL_REDUCE 1
-#define TEST_ALL_TO_ALL 0
-
-#define NUM_ELEMS_MIN 0x10000
+#define NUM_ELEMS_MIN 0x6000000
 #define NUM_ELEMS_MAX 0x6000000
 
 #define CHKNCCL(cmd) \
@@ -41,6 +38,9 @@ TestFramework::TestFramework(size_t nGpus, const uint32_t *gpuIDs,
     auto& info = m_infos[id];
     size_t nBytes = m_maxElems*sizeof(T);
     info.gpuId = gpuIDs != nullptr ? gpuIDs[id] : id;
+    info.graph = {};
+    info.graphExec = {};
+    info.graphCreated = false;
     CHK(cudaSetDevice(info.gpuId));
     int flags = hipDeviceMallocDefault;
                 //hipDeviceMallocFinegrained;
@@ -52,7 +52,6 @@ TestFramework::TestFramework(size_t nGpus, const uint32_t *gpuIDs,
 
     CHK(cudaMemsetAsync(info.sendBuf, s_fillValue ^ 0xFF, nBytes, info.stream));
     CHK(cudaMemsetAsync(info.recvBuf, s_fillValue, nBytes, info.stream));
-
     CHKNCCL(ncclCommInitRank(&info.comm, m_nGpus, m_ncclId, id));
     init_gemm_op(id);
   }); // runJob
@@ -63,6 +62,12 @@ TestFramework::TestFramework(size_t nGpus, const uint32_t *gpuIDs,
 TestFramework::~TestFramework() {
   for(auto& info : m_infos) {
     (void)cudaSetDevice(info.gpuId);
+#if USE_GRAPH_API
+    if(info.graphCreated) {
+      (void)cudaGraphExecDestroy(info.graphExec);
+      (void)cudaGraphDestroy(info.graph);
+    }
+#endif
     (void)cudaStreamDestroy(info.stream);
     (void)cudaFree(info.sendBuf);
     (void)ncclCommDestroy(info.comm);
@@ -106,20 +111,20 @@ void TestFramework::verify(int id) {
   }
   auto dst = m_hostBuf.data();
   CHK(cudaMemcpy(dst, m_infos[id].recvBuf, sz*sizeof(T), cudaMemcpyDeviceToHost));
-#if TEST_COLLECTIVE_PERMUTE
-  auto t = (id - 1 + m_nGpus) % m_nGpus;
-  VLOG("Device " << id << " verifying: expecting data from: " << t);
-  for(uint32_t j = 0, num = 0; j < m_curElems; j++) {
-    auto truth = getElement(t, j);
-    if(dst[j] != truth) {
-      //ThrowError<>("%d: verify failed truth: %f gpu: %f", j, truth, dst[j]);
-      PRINTZ("0x%X/%d: verify failed truth: %d gpu: %d (%X)", j, j, 
-              truth, dst[j], dst[j]);
-      if(num++ >= 5)
-        break;
-    }
-  }
-#endif
+// #if TEST_COLLECTIVE_PERMUTE
+  // auto t = (id - 1 + m_nGpus) % m_nGpus;
+  // VLOG("Device " << id << " verifying: expecting data from: " << t);
+  // for(uint32_t j = 0, num = 0; j < m_curElems; j++) {
+  //   auto truth = getElement(t, j);
+  //   if(dst[j] != truth) {
+  //     //ThrowError<>("%d: verify failed truth: %f gpu: %f", j, truth, dst[j]);
+  //     PRINTZ("0x%X/%d: verify failed truth: %d gpu: %d (%X)", j, j, 
+  //             truth, dst[j], dst[j]);
+  //     if(num++ >= 5)
+  //       break;
+  //   }
+  // }
+// #endif
 }
 
 void TestFramework::run_rccl_op(int id, int iter) 
@@ -190,12 +195,30 @@ void TestFramework::run_thread(int id, int numIters, bool verifyData)
   m_barrier.wait(); // wait all threads to arrive here before starting timing
   auto& info = m_infos[id];
 
+#if USE_GRAPH_API
+  if(!info.graphCreated) {
+    CHK(cudaStreamBeginCapture(info.stream, cudaStreamCaptureModeThreadLocal));
+
+    for(int i = 0; i < numIters; i++) {
+      VLOG("\n============================ " << m_curElems << " =============================\n");
+      run_gemm_op(id, 2);
+      run_rccl_op(id, i);
+    }
+    CHK(cudaStreamEndCapture(info.stream, &info.graph));
+    CHK(cudaGraphInstantiate(&info.graphExec, info.graph, NULL, NULL, 0));
+
+    info.graphCreated = true;
+  }
+  CPU_BEGIN_TIMING(T); 
+  CHK(cudaGraphLaunch(info.graphExec, info.stream));
+#else
   CPU_BEGIN_TIMING(T); 
   for(int i = 0; i < numIters; i++) {
     //VLOG("\n============================ " << m_curElems << " =============================\n");
     run_gemm_op(id, 2);
     run_rccl_op(id, i);
   } 
+#endif  
 
   CHK(cudaStreamSynchronize(info.stream));
   auto tnow = std::chrono::high_resolution_clock::now();
@@ -249,17 +272,23 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
       (double)(elemsMax*sizeof(TestFramework::T))/(1024*1024) << 
         " Mb; neighbour exchange with RCCL"
   );
-  std::vector< uint32_t > deviceAssignment{ 0, 1, 2, 3, 4, 5, 6, 7 };
+  
+  std::vector< uint32_t > deviceAssignment{0, 1, 2, 3, 4, 5, 6, 7 };
   if(nGpus > deviceAssignment.size()) {
     throw std::runtime_error("Invalid device assignment!");
   }
+
+  //RocProfilerSession s;
 
   TestFramework obj(nGpus, deviceAssignment.data(), elemsMax);
 #if VERIFY_DATA
   obj.run(elemsMin, 1, false, true); // first run to verify data
 #endif
   //obj.run(elemsMax, (nwarmups+1)/2);
+
+  //s.start();
   obj.run(elemsMin, nwarmups);
+  //s.stop();
 
 #if 1
   for(size_t sz = elemsMin; sz <= elemsMax; ) {
