@@ -23,7 +23,7 @@
 #endif
 
 #define USE_CONSTANT_MEM 0
-#define USE_BUFFER_LOADS 1
+#define USE_BUFFER_LOADS 0
 #define MAX_NUM_NODES 16
 // experimental feature to preload registers for the first iteration
 #define USE_PRELOAD_REGS 0
@@ -96,9 +96,19 @@ __global__ void rcclKernel(WorkInfo *gworkInfo);
 
 class GpuCommLib {
 
+/* best all-to-all
+Data size: 4.00 Mb; time elapsed: 0.131 ms, bandwidth: 32.028 Gb/s
+Data size: 6.00 Mb; time elapsed: 0.123 ms, bandwidth: 51.146 Gb/s
+Data size: 9.00 Mb; time elapsed: 0.124 ms, bandwidth: 76.156 Gb/s
+Data size: 13.50 Mb; time elapsed: 0.126 ms, bandwidth: 112.331 Gb/s
+Data size: 20.25 Mb; time elapsed: 0.146 ms, bandwidth: 145.579 Gb/s
+Data size: 30.38 Mb; time elapsed: 0.179 ms, bandwidth: 177.933 Gb/s
+Data size: 32.00 Mb; time elapsed: 0.183 ms, bandwidth: 183.046 Gb/s
+*/
+
   static constexpr size_t s_defNumWorkItems = 8;
-  static constexpr size_t s_numWorkThreads = 512;
-  static constexpr size_t s_numRegsPerThread = 16;
+  static constexpr size_t s_numWorkThreads = 256;
+  static constexpr size_t s_numRegsPerThread = 32;
 
   struct ThreadInfo {
     int gpuId;             // gpu ID assigned to this thread
@@ -121,7 +131,7 @@ public:
     if(m_initialized) return QCCL_Result::OK;
 
     m_infos.resize(nGpus);
-    size_t exchangeSz = sizeof(void *) * STotalSlots;
+    size_t exchangeSz = sizeof(void *) * STotalSlots * 8;
     for(uint32_t i = 0; i < nGpus; i++) {
       auto& info = m_infos[i];
       info.gpuId = gpuIds != nullptr ? gpuIds[i] : i;
@@ -183,7 +193,7 @@ public:
           .size = (uint32_t)inSize,
           // exchange buf on the receiver side: two entries per link
           // (we are receiver here): there we always publish our pointer
-          .exchangeBuf = (void **)m_infos[ID].exchangeBuf,
+          .exchangeBuf = (void **)m_infos[ID].exchangeBuf + inPeer*STotalSlots,
           .targetBuf = (uint8_t *)targetBuf,
     };
     w.outgoing = { // whom we are sending to
@@ -191,7 +201,7 @@ public:
           .size = (uint32_t)outSize,
           // exchange buf on the receiver side: two entries per link
           // node 'outPeer' is a receiver 
-          .exchangeBuf = (void **)m_infos[outPeer].exchangeBuf, 
+          .exchangeBuf = (void **)m_infos[outPeer].exchangeBuf + ID*STotalSlots,
           .sourceBuf = (uint8_t *)sourceBuf,
     };
     return QCCL_Result::OK;
@@ -246,8 +256,8 @@ public:
       allocWorkBuf(&info, info.numDevWorkItems * 3 / 2);
     }
     uint32_t nBlocks = info.workItems.size();
-    // VLOG(ID << ": workItemSz: " << sizeof(WorkInfo) << " running with #blocks:" 
-    //         << nBlocks);
+    // VLOG(ID << ": workItemSz: " << sizeof(WorkInfo) << " running with #blocks: " 
+    //          << nBlocks);
     // NOTE: do we really need to copy workBuf all the time ???
     CHK(cudaMemcpyAsync(info.workBuf, info.workItems.data(), 
           sizeof(WorkInfo) * nBlocks, cudaMemcpyHostToDevice, stream));
@@ -289,6 +299,10 @@ __constant__ WorkInfo ds_work[MAX_NUM_NODES];
 #endif
 
 __forceinline__ __device__ void setupInPtrs() {
+
+  if(ds_work.ID == ds_work.incoming.peer) {
+    return; // we are receiving from ourselves
+  }
 
   // we provide the sender our incoming buffer
   // NOTE adding GLOBAL here, inserts s_waitcnt vmcnt(7) after global stores!!!.
@@ -342,6 +356,12 @@ __forceinline__ __device__ void setupGatewayPtrs() {
 
 __forceinline__ __device__ void setupOutPtrs() {
 
+  // we are sending to ourselves
+  if(ds_work.ID == ds_work.outgoing.peer) {
+    ds_work.targetBuf = ds_work.incoming.targetBuf;
+    return; 
+  }
+
   auto& item = ds_work.outgoing;
   void *volatile *slot = item.exchangeBuf;
   // gprint("%d / %p: Starting receive target buf", ds_work.ID, slot);
@@ -384,8 +404,11 @@ __forceinline__ __device__ void finalizeSendRecv(uint32_t tid) {
 
     // gateway nodes do not need to wait here, also do not wait if
     // target buffer is NULL (we do not receive anything) 
-  } else if(tid / warpSize == 1 && ds_work.dataOfs == 0 && 
+  } else if(tid == warpSize && ds_work.dataOfs == 0 && 
             ds_work.incoming.targetBuf != nullptr) {
+
+    if(ds_work.ID == ds_work.incoming.peer)
+      return;
 
     auto slot = (void *GLOBAL *)ds_work.incoming.exchangeBuf;
     auto readyCnt = (uint32_t GLOBAL *)(slot + SReadyFlagCounter);
@@ -668,8 +691,8 @@ __global__ void rcclKernel(WorkInfo *gworkInfo) {
     // we are left with at most BlockSz*NumRegs
     ofs += niters*BlockSz*NumRegs;
     // the loop above covers bytes divisible by 16...
-    // copyMainLoop< Word, BlockSz, NumRegs, false, true >
-    //                        (regs, ofs, 1, nwords);
+    copyMainLoop< Word, BlockSz, NumRegs, false, true >
+                           (regs, ofs, 1, nwords);
    
     const uint32_t nbytes16 = bytes % 16;
     if(tid < nbytes16 / 4) { // 12, 8 or 4 bytes left

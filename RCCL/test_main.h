@@ -8,6 +8,51 @@
 #include "common/common.h"
 #include "common/threading.hpp"
 
+// whether to test all-to-all or collective-permute
+#define TEST_ALL_TO_ALL 1
+
+#define USE_CUSTOM_QCCL 1
+// the number of GPUs communicating (set to -1 to use all available GPUs)
+#define NUM_ACTIVE_GPUS 8
+
+#if !TEST_ALL_TO_ALL
+// whether to use light variant with just 3 GPUs for debugging extra peers
+#define USE_DEBUG_CONFIG_3_GPUS 0
+// if zero, all traffic is sent directly to target GPUs 
+// this has no effect if USE_CUSTOM_QCCL = 0
+#define NUM_EXTRA_PEERS 1
+// this portion of traffic is sent to target GPUs directly (1: whole traffic)
+// this has no effect if USE_CUSTOM_QCCL = 0
+#define EXTRA_PEERS_SPLIT_FACTOR 0.7
+#else
+#define USE_DEBUG_CONFIG_3_GPUS 0
+#define NUM_EXTRA_PEERS 0
+#define EXTRA_PEERS_SPLIT_FACTOR 1.0
+#endif
+
+#define VERIFY_DATA 1
+// run only one verify iteration and then quit
+#define STOP_AFTER_VERIFY 0
+
+#if 0
+#define NUM_ELEMS_MIN 2322432
+#define NUM_ELEMS_MAX 9289728*8
+#else
+#define NUM_ELEMS_MIN 1024*1024
+#define NUM_ELEMS_MAX 1024*1024*8
+#endif
+
+#if USE_DEBUG_CONFIG_3_GPUS && !USE_CUSTOM_QCCL
+#error Debug config only works for custom QCCL!
+#endif
+
+#define CHKNCCL(cmd) \
+  if(auto res = (cmd); res != ncclSuccess) {           \
+    PRINTZ("Test NCCL failure %s:%d '%s'",              \
+        __FILE__,__LINE__, ncclGetErrorString(res));     \
+  }
+
+
 template < class T >
 struct Matrix : std::vector< T > {
 

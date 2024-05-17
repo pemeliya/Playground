@@ -14,32 +14,6 @@
 #include "test_main.h"
 #include "qccl_lib.h"
 
-#define USE_CUSTOM_QCCL 0
-// whether to use light variant with just 3 GPUs for debugging extra peers
-#define USE_DEBUG_CONFIG_3_GPUS 0
-// the number of GPUs communicating (set to -1 to use all available GPUs)
-#define NUM_ACTIVE_GPUS 8
-// if zero, all traffic is sent directly to target GPUs 
-// this has no effect if USE_CUSTOM_QCCL = 0
-#define NUM_EXTRA_PEERS 1
-// this portion of traffic is sent to target GPUs directly (1: whole traffic)
-// this has no effect if USE_CUSTOM_QCCL = 0
-#define EXTRA_PEERS_SPLIT_FACTOR 0.7
-#define VERIFY_DATA 1
-// run only one verify iteration and then quit
-#define STOP_AFTER_VERIFY 1
-
-#if 0
-#define NUM_ELEMS_MIN 2322432
-#define NUM_ELEMS_MAX 9289728*8
-#else
-#define NUM_ELEMS_MIN 16384*10 + 32001 //1011*111
-#define NUM_ELEMS_MAX NUM_ELEMS_MIN
-#endif
-
-#if USE_DEBUG_CONFIG_3_GPUS && !USE_CUSTOM_QCCL
-#error Debug config only works for custom QCCL!
-#endif
 
 #if 0
 Num devices: 2; max data size: 283.5 Mb; neighbour exchange with RCCL
@@ -124,8 +98,9 @@ TestFramework::~TestFramework() {
 auto TestFramework::getElement(int device, size_t idx) -> T {
   //return static_cast<T>(100.0f*std::sin((float)idx*2*M_PI/(device+2)));
   int ii = idx + 1;
+  //return static_cast<T>(ii);
   return static_cast<T>(device + 11111 ^ (ii*ii*ii));
-  //return static_cast<T>(device + ii);
+  //return static_cast<T>(device + 1000);
 }
 
 void TestFramework::fill_verify_data(int id) {
@@ -169,6 +144,19 @@ void TestFramework::verify(int id) {
   t = 1 - id;
 #endif
 
+#if TEST_ALL_TO_ALL
+  VLOG("Device " << id << " verifying outputs..");
+  uint32_t chunk_len = m_curElems / m_nGpus;
+  // device ID: gets id's chunk from all devices  
+  for(uint32_t j = 0, num = 0; j < m_curElems; j++) {
+    auto gpuID = j / chunk_len, idx = j % chunk_len;
+    auto truth = getElement(gpuID, id*chunk_len + idx);
+    if(dst[j] != truth) {
+      PRINTZ("0x%X/%d: verify failed truth: %d gpu: %d (%X)", j, j, 
+              truth, dst[j], dst[j]);
+    }
+  }
+#else
   VLOG("Device " << id << " verifying: expecting data from: " << t);
   for(uint32_t j = 0, num = 0; j < m_curElems; j++) {
     auto truth = getElement(t, j);
@@ -188,14 +176,28 @@ void TestFramework::verify(int id) {
         break;
     }
   }
+#endif
 }
 
 #if USE_CUSTOM_QCCL
 void TestFramework::run_single_gpu(int id) 
 {
   auto& info = m_infos[id];
-  const auto& V = m_commGraph[id];
 #if !USE_DEBUG_CONFIG_3_GPUS
+
+#if TEST_ALL_TO_ALL
+  size_t size = m_sizes[0] / m_nGpus, ofs = 0;
+  uint32_t numSubscribedPeers = 1;
+  auto recvBuf = (uint8_t *)info.recvBuf, 
+       sendBuf = (uint8_t *)info.sendBuf;
+  for(int i = 0; i < m_nGpus; i++, ofs += size) {
+    CHKQCCL(qcclSendRecv(id, numSubscribedPeers, 
+            i, recvBuf + ofs, size,
+            i, sendBuf + ofs, size));
+  }
+
+#else // TEST_ALL_TO_ALL
+  const auto& V = m_commGraph[id];
   uint32_t numSubscribedPeers = 1 + m_nExtraPeers;
   for(int i = 0; i <= m_nExtraPeers; i++) {
       int inP = V[i].in, outP = V[i].out;
@@ -207,8 +209,10 @@ void TestFramework::run_single_gpu(int id)
         CHKQCCL(qcclGatewaySend(id, numSubscribedPeers, inP, outP, 
               m_offsets[i], size));
       }
-  } 
-#else
+  }
+#endif // TEST_ALL_TO_ALL
+
+#else // USE_DEBUG_CONFIG_3_GPUS
   uint32_t numSubscribedPeers = 1;
   size_t size = m_curElems * sizeof(T),
          sz1 = (size * 3/3) & ~15, 
@@ -241,9 +245,12 @@ void TestFramework::run_single_gpu(int id)
 void TestFramework::run_single_gpu(int id) 
 {
   auto& info = m_infos[id];
-  const auto& V = m_commGraph[id];
-
   auto type = (ncclDataType_t)getNcclType();
+#if TEST_ALL_TO_ALL
+  CHKNCCL(ncclAllToAll(info.sendBuf, info.recvBuf, m_curElems / m_nGpus, 
+        type, info.comm, info.stream));
+#else
+  const auto& V = m_commGraph[id];
   int rank;
   // CHKNCCL(ncclCommCount(m_comms[i], &nRanks));
   // CHKNCCL(ncclCommCuDevice(m_comms[i], &dev));
@@ -255,6 +262,8 @@ void TestFramework::run_single_gpu(int id)
   CHKNCCL(ncclRecv(info.recvBuf, 
         m_curElems, type, recvP, info.comm, info.stream));
   CHKNCCL(ncclGroupEnd());
+#endif
+
 }
 #endif // USE_CUSTOM_QCCL
 
@@ -286,11 +295,11 @@ void TestFramework::run(size_t numElems, int numIters, bool measureTime, bool ve
   m_sizes[m_nExtraPeers] = total - m_offsets[m_nExtraPeers];
 #if !USE_DEBUG_CONFIG_3_GPUS // this is not relevant for debug config
   if(verifyData) {
-    PRINTZ("curElems: %u / 0x%lX (%u / %lX bytes)", 
+    PRINTZ("curElems: %zu / 0x%lX (%zu / %lX bytes)", 
           m_curElems, m_curElems, total, total);
   }
   for(uint32_t i = 0; i <= m_nExtraPeers && verifyData; i++) {
-    PRINTZ("%d: ofs: %ld/%lX mod16: %d; size: %ld/%lX; sum: 0x%lX bytes", 
+    PRINTZ("%d: ofs: %ld/%lX mod16: %lu; size: %ld/%lX; sum: 0x%lX bytes", 
           i, m_offsets[i], m_offsets[i], m_offsets[i] % 16,
           m_sizes[i], m_sizes[i], m_offsets[i] + m_sizes[i]);
   }
@@ -352,7 +361,7 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
       "RCCL"
 #endif
   );
-  std::vector< uint32_t > deviceAssignment{ 1, 2, 3, 4, 5, 6, 7, 0 };
+  std::vector< uint32_t > deviceAssignment{ 0, 1, 2, 3, 4, 5, 6, 7 };
   if(nGpus > deviceAssignment.size()) {
     throw std::runtime_error("Invalid device assignment!");
   }
