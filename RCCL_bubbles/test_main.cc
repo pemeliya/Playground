@@ -12,7 +12,7 @@
 #include "test_main.h"
 
 // the number of GPUs communicating (set to -1 to use all available GPUs)
-#define NUM_ACTIVE_GPUS 2
+#define NUM_ACTIVE_GPUS 8
 #define VERIFY_DATA 0
 #define USE_GRAPH_API 1
 
@@ -197,14 +197,35 @@ void TestFramework::run_thread(int id, int numIters, bool verifyData)
 
 #if USE_GRAPH_API
   if(!info.graphCreated) {
-    CHK(cudaStreamBeginCapture(info.stream, cudaStreamCaptureModeThreadLocal));
 
-    for(int i = 0; i < numIters; i++) {
-      VLOG("\n============================ " << m_curElems << " =============================\n");
+    VLOG("Starting stream capture.." << numIters);
+    //CHK(cudaGraphCreate(&info.graph, /*flags=*/0));
+
+    CHK(cudaStreamBeginCapture(info.stream, cudaStreamCaptureModeThreadLocal));
+    // CHK(cudaStreamBeginCaptureToGraph(info.stream, info.graph,
+    //         nullptr, nullptr, 0, cudaStreamCaptureModeThreadLocal));
+    for(int i = 0; i < 1; i++) {
       run_gemm_op(id, 2);
       run_rccl_op(id, i);
+      run_rccl_op(id, i+1);
     }
     CHK(cudaStreamEndCapture(info.stream, &info.graph));
+
+    VLOG("Starting stream capture to existing graph..");
+    CHK(cudaStreamBeginCaptureToGraph(info.stream, info.graph,
+            nullptr, nullptr, 0, cudaStreamCaptureModeThreadLocal));
+    for(int i = 0; i < numIters-1; i++) {
+      run_gemm_op(id, 2);
+      run_rccl_op(id, i);
+      run_rccl_op(id, i+1);
+    }
+    cudaGraph_t graph;
+    CHK(cudaStreamEndCapture(info.stream, &graph));
+    VLOG("graph " << graph << " --- " << info.graph);
+    if(graph != info.graph) {
+      ThrowError<>("Graphs differ!");
+    }
+
     CHK(cudaGraphInstantiate(&info.graphExec, info.graph, NULL, NULL, 0));
 
     info.graphCreated = true;
@@ -217,6 +238,7 @@ void TestFramework::run_thread(int id, int numIters, bool verifyData)
     //VLOG("\n============================ " << m_curElems << " =============================\n");
     run_gemm_op(id, 2);
     run_rccl_op(id, i);
+    run_rccl_op(id, i+1);
   } 
 #endif  
 

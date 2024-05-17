@@ -7,26 +7,11 @@
 #include <hip/hip_fp16.h>
 #include <hip/hip_complex.h>
 #include <iostream>
+#include <random>
 #include <optional>
 
-#ifdef USE_EXTERNAL_HIPBLASLT
-#include "include/hipblaslt/hipblaslt-version.h"
-#include "include/hipblaslt/hipblaslt.h"
-#else
-#include <hipblaslt/hipblaslt.h>
-#endif
-
-#if HIPBLASLT_VERSION_MINOR < 6
-#define hipblasltDatatype_t hipblasDatatype_t
-#define HIPBLASLT_R_16F HIPBLAS_R_16F
-#define HIPBLASLT_R_16B HIPBLAS_R_16B
-#define HIPBLASLT_R_32F HIPBLAS_R_32F
-#define HIPBLASLT_R_64F HIPBLAS_R_64F
-#define HIPBLASLT_R_8I HIPBLAS_R_8I
-#define HIPBLASLT_R_32I HIPBLAS_R_32I
-#define HIPBLASLT_C_32F HIPBLAS_C_32F
-#define HIPBLASLT_C_64F HIPBLAS_C_64F
-#endif
+#include "common/example_utils.hpp"
+#include "common/hipblaslt_gemm.hpp"
 
 #define LOG(x) std::cerr << x << std::endl
 
@@ -35,355 +20,119 @@
                 error, __FILE__, __LINE__); throw 0;  \
     }
 
-#define CHK_HIPBLASLT(error) if(error != HIPBLAS_STATUS_SUCCESS) { \
-       fprintf(stderr, "hipBLASLt error %s at %s:%d\n", hipblasStatusToString(error), \
-            __FILE__, __LINE__); throw 0;  \
-    }
+template < class Float, class ComputeT > 
+void populateRandomVec(std::vector< Float >& vec, ComputeT) {
 
-#define SET_ATTR(setter, handle, attr, value) \
-  CHK_HIPBLASLT(setter(handle, attr, &value, sizeof(decltype(value))))
-
-template <typename T>
-void SetAttr(hipblasLtMatrixLayout_t handle,
-                    hipblasLtMatrixLayoutAttribute_t attr, T value) {
-  SET_ATTR(hipblasLtMatrixLayoutSetAttribute, handle, attr, value);
-}
-
-template <typename T>
-void SetAttr(hipblasLtMatmulDesc_t handle,
-                    hipblasLtMatmulDescAttributes_t attr, T value) {
-  SET_ATTR(hipblasLtMatmulDescSetAttribute, handle, attr, value);
-}
-template <typename T>
-void SetAttr(hipblasLtMatmulPreference_t handle,
-                    hipblasLtMatmulPreferenceAttributes_t attr, T value) {
-  SET_ATTR(hipblasLtMatmulPreferenceSetAttribute, handle, attr,
-                  value);
-}
-
-template< class NT >
-struct MappedVector {
-    
-   explicit MappedVector(size_t N_) : N(N_) {
-       CHK_HIP(hipHostMalloc((void**)&devPtr, N*sizeof(NT)))
-   }
-   size_t size() const { return N; }
-   NT& operator[](size_t i) {
-      return devPtr[i];
-   }
-   ~MappedVector() {
-      (void)hipHostFree(devPtr);
-   }
-   size_t N;
-   NT *devPtr;
-};
-
-template < class T >
-constexpr hipblasltDatatype_t HipBlasltType(const T *) {
-  if constexpr (std::is_same_v<T, __half>) 
-    return HIPBLASLT_R_16F;
-  if constexpr (std::is_same_v<T, hip_bfloat16>) 
-    return HIPBLASLT_R_16B;
-  if constexpr (std::is_same_v<T, float>) 
-    return HIPBLASLT_R_32F;
-  if constexpr (std::is_same_v<T, double>) 
-    return HIPBLASLT_R_64F;
-  if constexpr (std::is_same_v<T, int32_t>) 
-    return HIPBLASLT_R_32I;
-  if constexpr (std::is_same_v<T, int8_t>) 
-    return HIPBLASLT_R_8I;
-  if constexpr (std::is_same_v<T, hipFloatComplex>) 
-    return HIPBLASLT_C_32F;
-  if constexpr (std::is_same_v<T, hipDoubleComplex>) 
-    return HIPBLASLT_C_64F;
-  
-  return (hipblasltDatatype_t)-1;
-}
-
-std::ostream& operator<<(std::ostream& os, hipFloatComplex Z) {
-  return os << Z.x << "+i*" << Z.y;
-}
-
-std::ostream& operator<<(std::ostream& os, hipDoubleComplex Z) {
-  return os << Z.x << "+i*" << Z.y;
-}
-
-template < class T >
-void initVec(T *ptr, std::initializer_list< double > l) 
-{
-  for(const auto& elem : l) {
-    *ptr++ = static_cast< T >(elem);
+  std::uniform_real_distribution<ComputeT> generator(-0.1f, 0.2f);
+  std::minstd_rand0 engine;
+  for(auto& v : vec) {
+    v = static_cast< Float >(generator(engine));
   }
-}
-
-template < class T >
-void initRange(T *ptr, double start, double step, size_t n) 
-{
-  for(size_t i = 0; i < n; i++) {
-    *ptr++ = static_cast< T >(start + i*step);
-  }
-}
-
-template <typename T>
-using Owned =
-      std::unique_ptr<std::remove_pointer_t<T>, hipblasStatus_t (*)(T)>;
-
-struct BlasLt {
-  BlasLt() : blas_lt_(nullptr, hipblasLtDestroy) {
-    hipblasLtHandle_t H;
-    CHK_HIPBLASLT(hipblasLtCreate(&H));
-    blas_lt_.reset(H);
-  }
-
-  hipblasLtHandle_t get() {
-    return blas_lt_.get();
-  }
-
- private:
-  Owned<hipblasLtHandle_t> blas_lt_;
-};
-
-struct HipMatrixLayout {
-
-    enum class Order { kRowMajor, kColumnMajor };
-
-    HipMatrixLayout(hipblasltDatatype_t type, size_t num_rows, size_t num_cols, 
-          Order order, size_t batch_size = 1,
-          std::optional<int64_t> leading_dim_stride = std::nullopt,
-          std::optional<int64_t> batch_stride = std::nullopt)
-        : handle_(nullptr, hipblasLtMatrixLayoutDestroy) {
-
-      if (!leading_dim_stride) {
-        leading_dim_stride = (order == Order::kRowMajor) ? num_cols : num_rows;
-      }
-      hipblasLtMatrixLayout_t hip_layout;
-      CHK_HIPBLASLT(hipblasLtMatrixLayoutCreate(
-        &hip_layout, type, num_rows, num_cols,
-        *leading_dim_stride));
-
-      // Wrap hipblas handle immediately, so it is cleaned up if an error occurs.
-      handle_.reset(hip_layout);
-      SetAttr(hip_layout, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT,
-                              static_cast<int32_t>(batch_size));
-
-      if (!batch_stride) {
-        batch_stride = (batch_size > 1) ? num_rows * num_cols : 0;
-      }
-      LOG("MatrixLayout type: " << (int)type << ","
-          << num_rows << "x" << num_cols << " leadingdim: "
-          << *leading_dim_stride << " batchstride: " <<  *batch_stride);
-
-      SetAttr(
-           hip_layout, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, *batch_stride);
-    }
-
-    hipblasLtMatrixLayout_t get() const { return handle_.get(); }
-
-  private:
-    Owned<hipblasLtMatrixLayout_t> handle_;
-};
-
-struct MatmulDesc {
-
-    MatmulDesc(hipblasLtComputeType_t compute_type, hipblasltDatatype_t scale_type,
-        hipblasOperation_t trans_a, hipblasOperation_t trans_b,
-        hipblasLtEpilogue_t epilogue)
-        : handle_(nullptr, hipblasLtMatmulDescDestroy) {
-
-      hipblasLtMatmulDesc_t hip_desc;
-      LOG("MatmulDesc compute_type: " << compute_type
-          << " scale_type " << scale_type << " epilogue " << int(epilogue)
-          << " transA " << trans_a << " transB " << trans_b);
-
-      CHK_HIPBLASLT(hipblasLtMatmulDescCreate(
-        &hip_desc, compute_type, scale_type));
-        // Wrap hipblas handle immediately, so it is cleaned up if an error occurs.
-      handle_.reset(hip_desc);
-
-      SetAttr(hip_desc, HIPBLASLT_MATMUL_DESC_TRANSA, trans_a);
-      SetAttr(hip_desc, HIPBLASLT_MATMUL_DESC_TRANSB, trans_b);
-      SetAttr(hip_desc, HIPBLASLT_MATMUL_DESC_EPILOGUE, epilogue);
-    }
-
-    hipblasLtMatmulDesc_t get() const { return handle_.get(); }
-
-   private:
-    Owned<hipblasLtMatmulDesc_t> handle_;
-  };
-
-struct GemmConfig {
-  hipblasLtHandle_t  handle;
-  hipblasOperation_t trans_a;
-  hipblasOperation_t trans_b;
-  hipblasLtComputeType_t compute_type;
-  int64_t            m;
-  int64_t            n;
-  int64_t            k;
-  void*              palpha;
-  void*              pbeta;
-  hipblasltDatatype_t scale_type;
-  hipblasltDatatype_t type_a;
-  hipblasltDatatype_t type_b;
-  hipblasltDatatype_t type_c;
-  hipblasltDatatype_t type_d;
-  void*              d_a;
-  void*              d_b;
-  void*              d_c;
-  void*              d_d;
-  void*              d_bias;
-  hipblasLtEpilogue_t epilogue;
-  uint64_t            max_workspace_size;
-  hipStream_t        stream;
-};
-
-void simpleGemm(const GemmConfig& cfg)
-{
-    MatmulDesc desc(cfg.compute_type, cfg.scale_type,
-            cfg.trans_a, cfg.trans_b, cfg.epilogue);
-
-    auto order = HipMatrixLayout::Order::kColumnMajor;
-    HipMatrixLayout matA(cfg.type_a, cfg.m, cfg.k, order);
-    HipMatrixLayout matB(cfg.type_b, cfg.k, cfg.n, order);
-    HipMatrixLayout matC(cfg.type_c, cfg.m, cfg.n, order);
-    HipMatrixLayout matD(cfg.type_d, cfg.m, cfg.n, order);
-
-    if (cfg.epilogue == HIPBLASLT_EPILOGUE_BIAS) {
-      static int dummy;
-		  CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
-			    desc.get(), HIPBLASLT_MATMUL_DESC_BIAS_POINTER, &dummy, sizeof(void*)));
-    }
-
-    // Set User Preference attributes
-    hipblasLtMatmulPreference_t pref;
-    CHK_HIPBLASLT(hipblasLtMatmulPreferenceCreate(&pref));
-    CHK_HIPBLASLT(hipblasLtMatmulPreferenceSetAttribute(pref,
-                                              HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-                                              &cfg.max_workspace_size,
-                                              sizeof(cfg.max_workspace_size)));
-    size_t max_algos = 128;
-    std::vector< hipblasLtMatmulHeuristicResult_t > algo_results(max_algos);
-    int returnedAlgoCount = 0;
-    CHK_HIPBLASLT(hipblasLtMatmulAlgoGetHeuristic(cfg.handle, desc.get(),
-                     matA.get(), matB.get(), matC.get(), matD.get(),
-                     pref, max_algos, algo_results.data(), &returnedAlgoCount));
-    hipblasLtMatmulPreferenceDestroy(pref);
-
-    if(returnedAlgoCount == 0) {
-        throw std::runtime_error("No valid solutions found!");
-    }
-    algo_results.resize(returnedAlgoCount);
-
-    hipblasLtMatmulHeuristicResult_t algoOK{
-      .state = HIPBLAS_STATUS_UNKNOWN,
-    };
-
-    uint64_t workspace_size = 0, i = 0;
-    void *d_workspace = nullptr;
-    for (const hipblasLtMatmulHeuristicResult_t& result : algo_results) {
-        if (result.state == HIPBLAS_STATUS_SUCCESS) {  // Skip failed algos.
-          algoOK = result;
-          break;
-        }
-    }
-     //workspace_size = max(workspace_size, heuristicResult[i].workspaceSize);
-    // In this sample, the workspace is already allocated with max_workspace_size
-    // If not, allocate d_workspace here
-    // CHK_HIPhipMalloc(&d_workspace, workspace_size));
-
-    if (cfg.epilogue == HIPBLASLT_EPILOGUE_BIAS) {
-			CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
-					desc.get(), HIPBLASLT_MATMUL_DESC_BIAS_POINTER, &cfg.d_bias, sizeof(cfg.d_bias)));
-    }
-
-    CHK_HIPBLASLT(hipblasLtMatmul(cfg.handle, desc.get(), cfg.palpha,
-                 cfg.d_a, matA.get(),
-                 cfg.d_b, matB.get(), cfg.pbeta,
-                 cfg.d_c, matC.get(),
-                 cfg.d_d, matD.get(),
-                 &algoOK.algo,
-                 d_workspace, workspace_size, cfg.stream));
 }
 
 int main(int argc, char *argv[]) try
 {
-	int m = 3, n = 2, k = 4;
+	int m = 768, n = 4096, k = 6144;
   float alpha{1.0}, beta{0.0};
 
+#if 1
   using TypeA = hip_bfloat16;
   using TypeB = hip_bfloat16;
+  using TypeC = hip_bfloat16;
+  using TypeD = hip_bfloat16;
+#else
+  using TypeA = float;
+  using TypeB = float;
   using TypeC = float;
   using TypeD = float;
+#endif
 
-  // using TypeA = double;
-  // using TypeB = double;
-  // using TypeC = double;
-  // using TypeD = double;
+  size_t extra = 0, extra2 = 16*1024*1024;
+  HVector< TypeA > a(m * k + extra);
+  HVector< TypeB > b(n * k + extra);
+  HVector< TypeC > c(m * n + extra);
+  HVector< TypeD > d1(m * n + extra2),
+                   d2(m * n + extra2); 
+  HVector< TypeD > bias(m + extra);
 
-  // using TypeA = hipDoubleComplex;
-  // using TypeB = hipDoubleComplex;
-  // using TypeC = hipDoubleComplex;
-  // using TypeD = hipDoubleComplex;
+#if 0
+  initRange(a.data(), 0.0, 0.02, m*k);
+  initRange(b.data(), 10.0, -0.01, n*k);
+  initRange(c.data(), 0.0, -0.005, m*n);
+  initRange(bias.data(), 0.0, -0.15, m);
+#else
+  populateRandomVec(a, float{});
+  populateRandomVec(b, float{});
+  populateRandomVec(c, float{});
+  populateRandomVec(bias, float{});
+#endif
 
-  size_t extra = 0;
-  MappedVector< TypeA > a(m * k + extra);
-  MappedVector< TypeB > b(n * k + extra);
-  MappedVector< TypeC > c(m * n + extra);
-  MappedVector< TypeD > d(m * n + extra);
-  MappedVector< TypeD > bias(m + extra);
+  a.copyHToD();
+  b.copyHToD();
+  c.copyHToD();
+  bias.copyHToD();
 
-  initRange(a.devPtr, 1.0, 1.0, m*k);
-  initRange(b.devPtr, 3.0, 0.5, n*k);
-  initVec(bias.devPtr, {10.0, 11.0, 12.0});
-
-  size_t max_workspace_size = 1ll << 32;
-  BlasLt blasLtObj;
-  simpleGemm(GemmConfig{
-    .handle = blasLtObj.get(),
-    .trans_a = HIPBLAS_OP_N,
+  BlasLtGemm gemm;
+  BlasLtGemm::Config cfg{
+    .trans_a = HIPBLAS_OP_T,
     .trans_b = HIPBLAS_OP_N,
-    .compute_type = HIPBLASLT_COMPUTE_F32,
+    .compute_type = HIPBLAS_COMPUTE_32F,
     .m = m,
     .n = n,
     .k = k,
-    .palpha = &alpha,
-    .pbeta = &beta,
-    .scale_type = HipBlasltType(&alpha),
-    .type_a = HipBlasltType(a.devPtr),
-    .type_b = HipBlasltType(b.devPtr),
-    .type_c = HipBlasltType(c.devPtr),
-    .type_d = HipBlasltType(d.devPtr),
-    .d_a = a.devPtr,
-    .d_b = b.devPtr,
-    .d_c = d.devPtr,
-    .d_d = d.devPtr,
-    .d_bias = bias.devPtr,
     .epilogue = HIPBLASLT_EPILOGUE_DEFAULT,
-    .max_workspace_size = max_workspace_size,
+    .max_algorithms = 512,
+    .max_workspace_size = 1ull << 32,
     .stream = 0,
-  });
+  };
 
-  //   HIPBLASLT_EPILOGUE_DEFAULT = 1,         /**<No special postprocessing, just scale and quantize the results if necessary.*/
-  // HIPBLASLT_EPILOGUE_RELU = 2,            /**<Apply ReLU point-wise transform to the results:(x:=max(x, 0))*/
-  // HIPBLASLT_EPILOGUE_BIAS = 4,            /**<Apply (broadcast) bias from the bias vector. Bias vector length must match matrix D rows, and it must be packed (such as stride between vector elements is 1). Bias vector is broadcast to all columns and added before applying the final postprocessing.*/
-  // HIPBLASLT_EPILOGUE_RELU_BIAS = 6,       /**<Apply bias and then ReLU transform.*/
-  // HIPBLASLT_EPILOGUE_GELU = 32,           /**<Apply GELU point-wise transform to the results (x:=GELU(x)).*/
-  // HIPBLASLT_EPILOGUE_GELU_BIAS = 36,      /**<Apply Bias and then GELU transform.*/
-  // HIPBLASLT_EPILOGUE_GELU_AUX = 160,      /**<Output GEMM results before applying GELU transform.*/
-  // HIPBLASLT_EPILOGUE_GELU_AUX_BIAS = 164, /**<Output GEMM results after applying bias but before applying GELU transform.*/
-  // HIPBLASLT_EPILOGUE_DGELU = 192,         /**<Apply gradient GELU transform. Requires additional aux input. */
-  // HIPBLASLT_EPILOGUE_DGELU_BGRAD = 208,   /**<Apply gradient GELU transform and bias gradient to the results. Requires additional aux input. */
-  // HIPBLASLT_EPILOGUE_BGRADA = 256,        /**<Apply bias gradient to A and output gemm result. */
-  // HIPBLASLT_EPILOGUE_BGRADB = 512   
+  VLOG("Running algorithm default");
+  auto plan = gemm.createPlan(a.devPtr, b.devPtr, c.devPtr, bias.devPtr,
+      d1.devPtr, alpha, beta, cfg);
 
-  CHK_HIP(hipDeviceSynchronize());
+  auto algos = gemm.getAlgorithms(plan, cfg);
 
-  for (int i = 0; i < m; i++) {
-  for (int j = 0; j < n; j++) {
-      auto& D = d[i * n + j];
-      std::cout << D << " ";
-   	}
-    std::cout << std::endl;
+#if 0
+  gemm.run(a.devPtr, b.devPtr, c.devPtr, bias.devPtr,
+      d1.devPtr, alpha, beta, cfg, plan, algos[0]);
+  d1.copyDToH();
+#else
+  matMatMultMixPrec(alpha, beta, m, n, k,
+    a.data(), k, 1, // m x k: (k, 1) or (1, m)
+    b.data(), 1, k, // n x k: (n, 1) or (1, k)
+    c.data(), 1, 1, // does not matter
+    d1.data(), 1, m); // m x n: (n, 1)  or (1, m)
+#endif
+
+  auto check_results = [&](const auto& truth, const auto& test, auto tolerance) {
+    for(size_t i = 0; i < m*n; i++) {
+      auto v1 = truth[i];
+      auto v2 = test[i];
+      if(!(std::isfinite(v1) == std::isfinite(v2) &&
+          std::abs(v1 - v2) /
+              (std::max(std::abs(v1), std::abs(v2)) + 1) < tolerance)) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  float tolerance = 0.01f;
+  uint32_t totalFailed = 0;
+  for(uint32_t i = 0; i < algos.size(); i++) {
+    gemm.run(a.devPtr, b.devPtr, c.devPtr, bias.devPtr,
+      d2.devPtr, alpha, beta, cfg, plan, algos[i]);
+    d2.copyDToH();
+
+    auto OK = check_results(d1, d2, tolerance);
+    if(!OK) {
+      auto [index, fallback] = gemm.getAlgoIndex(algos[i]);
+      VLOG(i << ": algorithm " << index << " accuracy mismatch vs CPU algorithm!");
+      totalFailed++;
+    }
   }
+  VLOG("Accuracy check failed for " << totalFailed << " out of " 
+      << algos.size() << " algorithms!");
   return 0;
 }
 catch(std::exception& ex) {
