@@ -195,6 +195,12 @@ struct BlasLtGemm {
     hipStream_t        stream;
   };
 
+  bool hasBias(hipblasLtEpilogue_t epi) {
+    return (epi == HIPBLASLT_EPILOGUE_BIAS || epi == HIPBLASLT_EPILOGUE_RELU_BIAS ||
+            epi == HIPBLASLT_EPILOGUE_GELU_BIAS ||
+            epi == HIPBLASLT_EPILOGUE_GELU_AUX_BIAS);
+  }
+
   template < class TypeA, class TypeB, class TypeC, class TypeD, class Scalar >
   MatmulPlan createPlan(const TypeA *dA, const TypeB *dB, const TypeC *dC, const TypeD *dBias,
       TypeD *dD, Scalar alpha, Scalar beta, const Config& cfg) {
@@ -204,23 +210,24 @@ struct BlasLtGemm {
     MatmulPlan plan = {
       .desc = HipMatmulDesc(cfg.compute_type, HipBlasltType(&alpha),
             cfg.trans_a, cfg.trans_b, cfg.epilogue),
-      .matA = HipMatrixLayout(HipBlasltType(dA), cfg.k, cfg.m, order),
+      .matA = HipMatrixLayout(HipBlasltType(dA), cfg.m, cfg.k, order),
       .matB = HipMatrixLayout(HipBlasltType(dB), cfg.k, cfg.n, order),
       .matC = HipMatrixLayout(HipBlasltType(dC), cfg.m, cfg.n, order),
       .matD = HipMatrixLayout(HipBlasltType(dD), cfg.m, cfg.n, order),
     };
 
-    if (cfg.epilogue == HIPBLASLT_EPILOGUE_BIAS) {
-      static int dummy;
-		  CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
-			    plan.desc.handle, HIPBLASLT_MATMUL_DESC_BIAS_POINTER, &dummy, sizeof(void*)));
-    }
-
     return std::move(plan);
   }
 
+  // template <typename T>
+  // void  SetAttr(hipblasLtMatmulDesc_t handle,
+  //                    hipblasLtMatmulDescAttributes_t attr, T value) {
+  //   CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute, handle, attr, value);
+  // }
+
+  template < class TypeD >
   std::vector< hipblasLtMatmulHeuristicResult_t > getAlgorithms(
-          const MatmulPlan& plan, const Config& cfg) {
+          const MatmulPlan& plan, const Config& cfg, const TypeD *dBias) {
      // Set User Preference attributes
     hipblasLtMatmulPreference_t pref;
     CHK_HIPBLASLT(hipblasLtMatmulPreferenceCreate(&pref));
@@ -228,6 +235,18 @@ struct BlasLtGemm {
                                               HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
                                               &cfg.max_workspace_size,
                                               sizeof(cfg.max_workspace_size)));
+
+    if (hasBias(cfg.epilogue)) {
+      auto dtype = HipBlasltType(dBias);
+      CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+         plan.desc.handle, HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
+             &dtype, sizeof(hipDataType)));
+
+      static int dummy = 0xF0F0F0F0; // actually it's enough to set some non-zero value
+		  CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+			     plan.desc.handle, HIPBLASLT_MATMUL_DESC_BIAS_POINTER, 
+             &dummy, sizeof(void *)));
+    }
 
     std::vector< hipblasLtMatmulHeuristicResult_t > 
         algo_results(cfg.max_algorithms), filtered;
@@ -269,15 +288,15 @@ struct BlasLtGemm {
       TypeD *dD, Scalar alpha, Scalar beta, const Config& cfg, 
       const MatmulPlan& plan, hipblasLtMatmulHeuristicResult_t algo)
   {
-     //workspace_size = max(workspace_size, heuristicResult[i].workspaceSize);
-    // In this sample, the workspace is already allocated with max_workspace_size
-    // If not, allocate d_workspace here
-    // CHK_HIPhipMalloc(&d_workspace, workspace_size));
+    if (hasBias(cfg.epilogue)) {
+      auto dtype = HipBlasltType(dBias);
+      CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+        plan.desc.handle, HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
+            &dtype, sizeof(hipDataType)));
 
-    if (cfg.epilogue == HIPBLASLT_EPILOGUE_BIAS) {
-			CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
-					plan.desc.handle, HIPBLASLT_MATMUL_DESC_BIAS_POINTER, 
-          dBias, sizeof(dBias)));
+		  CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+			    plan.desc.handle, HIPBLASLT_MATMUL_DESC_BIAS_POINTER, 
+              &dBias, sizeof(void *)));
     }
 
     if(algo.workspaceSize > workspace_sz_) {
@@ -307,7 +326,8 @@ void matMatMultMixPrec(T alpha, T beta, int M, int N, int K,
     U*  A, int As1, int As2,
     U*  B, int Bs1, int Bs2,
     V*  C, int Cs1, int Cs2,
-    V*  D, int Ds1, int Ds2)
+    V*  D, int Ds1, int Ds2,
+    V *bias = nullptr)
 {
   for(int i1 = 0; i1 < M; i1++)
   {
@@ -318,7 +338,11 @@ void matMatMultMixPrec(T alpha, T beta, int M, int N, int K,
       {
         t += T(A[i1 * As1 + i3 * As2]) * T(B[i3 * Bs1 + i2 * Bs2]);
       }
-      D[i1 * Ds1 + i2 * Ds2] = V(beta * T(C[i1 * Cs1 + i2 * Cs2]) + alpha * t);
+      V v(beta * T(C[i1 * Cs1 + i2 * Cs2]) + alpha * t);
+      if(bias != nullptr) {
+        v += bias[i1];
+      }
+      D[i1 * Ds1 + i2 * Ds2] = v;
     }
   }
 }

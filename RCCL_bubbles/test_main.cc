@@ -187,7 +187,7 @@ void TestFramework::init_gemm_op(int id) {
 void TestFramework::run_gemm_op(int id, int nIters) {
   
   auto& info = m_infos[id];
-  info.gemm.run(nIters);
+  info.gemm.run(info.stream, nIters);
 }
 
 void TestFramework::run_thread(int id, int numIters, bool verifyData) 
@@ -205,9 +205,9 @@ void TestFramework::run_thread(int id, int numIters, bool verifyData)
     // CHK(cudaStreamBeginCaptureToGraph(info.stream, info.graph,
     //         nullptr, nullptr, 0, cudaStreamCaptureModeThreadLocal));
     for(int i = 0; i < 1; i++) {
-      run_gemm_op(id, 2);
-      run_rccl_op(id, i);
-      run_rccl_op(id, i+1);
+      run_gemm_op(id, 5);
+      // run_rccl_op(id, i);
+      // run_rccl_op(id, i+1);
     }
     CHK(cudaStreamEndCapture(info.stream, &info.graph));
 
@@ -215,9 +215,9 @@ void TestFramework::run_thread(int id, int numIters, bool verifyData)
     CHK(cudaStreamBeginCaptureToGraph(info.stream, info.graph,
             nullptr, nullptr, 0, cudaStreamCaptureModeThreadLocal));
     for(int i = 0; i < numIters-1; i++) {
-      run_gemm_op(id, 2);
-      run_rccl_op(id, i);
-      run_rccl_op(id, i+1);
+      run_gemm_op(id, 5);
+      // run_rccl_op(id, i);
+      // run_rccl_op(id, i+1);
     }
     cudaGraph_t graph;
     CHK(cudaStreamEndCapture(info.stream, &graph));
