@@ -53,6 +53,8 @@ struct BlasGemm
   void init(cudaStream_t stream) {
     CHK_ROCBLAS(rocblas_create_handle(&handle_));
     CHK_ROCBLAS(rocblas_set_pointer_mode(handle_, rocblas_pointer_mode_host))
+    // TODO: uncomment this line in order to get the code working !
+    // CHK_ROCBLAS(rocblas_set_stream(handle_, stream));
   }
 
   ~BlasGemm() {
@@ -166,6 +168,7 @@ struct BlasGemm
 
   void run(cudaStream_t stream, int n_times) {
 
+    // NOTE: rocblas_set_stream fails with rocblas_internal_error !
     CHK_ROCBLAS(rocblas_set_stream(handle_, stream));
     TypeD alpha{1}, beta{0};
     for(int i = 0; i < n_times; i++) {
@@ -200,7 +203,6 @@ public:
     cudaGraphExec_t graphExec;
     bool graphCreated;
     T *sendBuf, *recvBuf; // send and receive buffers
-    ncclComm_t comm;      // NCCL handle
     BlasGemm gemm;        // gemm op handle
     double elapsedMs;     // time elapsed per thread
   };
@@ -212,22 +214,6 @@ public:
   TestFramework(size_t nGpus, const uint32_t *gpuIDs, size_t maxElems);
   ~TestFramework();
 
-  constexpr int32_t getNcclType() {
-#define OO(type, id) \
-  if constexpr(std::is_same_v<T, type>) return id
-    OO(int8_t, ncclInt8);
-    OO(uint8_t, ncclUint8);
-    OO(int32_t, ncclInt32);
-    OO(uint32_t, ncclUint32);
-    OO(int64_t, ncclInt64);
-    OO(uint64_t, ncclUint64);
-    OO(half, ncclFloat16);
-    OO(float, ncclFloat32);
-    OO(double, ncclFloat64);
-#undef OO
-  }
-
-  void run_rccl_op(int id, int iter);
   void init_gemm_op(int id);
   void run_gemm_op(int id, int nIters);
 
@@ -237,7 +223,6 @@ public:
 private:
   T getElement(int device, size_t idx);
   void fill_verify_data(int id);
-  void verify(int id);
 
 private:
   ncclUniqueId m_ncclId;
