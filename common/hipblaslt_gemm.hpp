@@ -195,6 +195,8 @@ struct BlasLtGemm {
     hipStream_t        stream;
   };
 
+  auto handle() { return blas_lt_; }
+
   bool hasBias(hipblasLtEpilogue_t epi) {
     return (epi == HIPBLASLT_EPILOGUE_BIAS || epi == HIPBLASLT_EPILOGUE_RELU_BIAS ||
             epi == HIPBLASLT_EPILOGUE_GELU_BIAS ||

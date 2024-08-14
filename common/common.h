@@ -7,6 +7,7 @@
 #include <limits>
 #include <vector>
 #include <stdexcept>
+#include <random>
 
 #if COMPILE_FOR_ROCM
 #include<hip/hip_runtime.h>
@@ -129,6 +130,15 @@ void initRange(T *ptr, double start, double step, size_t n)
 {
   for(size_t i = 0; i < n; i++) {
     *ptr++ = static_cast< T >(start + i*step);
+  }
+}
+
+template < class T >
+void initRandomFloat(T *ptr, double dmin, double dmax, size_t n, size_t seed) {
+   std::mt19937 gen(seed); 
+   std::uniform_real_distribution<> dis(dmin, dmax);
+   for(size_t i = 0; i < n; i++) {
+    *ptr++ = static_cast< T >(dis(gen));
   }
 }
 

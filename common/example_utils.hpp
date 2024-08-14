@@ -226,7 +226,7 @@ private:
     timer.Stop();                       \
     float ms = timer.ElapsedMillis();                  \
     if(nIters > 0) ms /= nIters;                        \
-    fprintf(stderr, fmt "; time elapsed: %.3f ms\n", ##__VA_ARGS__, ms); \
+    fprintf(stderr, fmt "; time elapsed: %.3f us\n", ##__VA_ARGS__, ms*1000.f); \
     }
 
 //! compares 2D arrays of data, \c width elements per row stored with \c stride (stride == width)
@@ -254,6 +254,7 @@ bool checkme(const NT *checkit, const NT *truth, size_t width, size_t stride,
         ibeg = width - 1, iend = jend;
     }
 
+    using FT = double;
     for(size_t j = jbeg; j != jend; j += inc) {
 
         const NT *pcheckit = checkit + j * stride,
@@ -261,13 +262,14 @@ bool checkme(const NT *checkit, const NT *truth, size_t width, size_t stride,
 
         for(size_t i = ibeg; i != iend; i += inc) {
             
-            NT diff = pcheckit[i] - ptruth[i];
+            auto check = (FT)pcheckit[i], truth = (FT)ptruth[i],
+                 diff = check - truth;
             bool isDiff = false;
-            if constexpr(std::is_floating_point_v< NT >) {
-                bool nan1 = std::isnan(ptruth[i]), nan2 = std::isnan(pcheckit[i]);
+            if constexpr(std::is_floating_point_v< FT >) {
+                bool nan1 = std::isnan(truth), nan2 = std::isnan(check);
                 if(nan1 && nan2)
                   continue;
-                isDiff = std::abs(diff) > eps || nan1 || nan2;
+                isDiff = std::abs(diff) > FT(eps) || nan1 || nan2;
             } else {
                 isDiff = std::abs(std::make_signed_t<NT>(diff)) > eps;
             }
@@ -275,11 +277,10 @@ bool checkme(const NT *checkit, const NT *truth, size_t width, size_t stride,
                 res = false;
 
             if((isDiff || !print_when_differs) && printed < print_max) {
-                NT check = pcheckit[i], truth = ptruth[i];
-
                 printed++;
                 std::cerr << j << '(' << i << ") (GPU, truth): " <<
-                   check << " and " << truth << " ; diff: " << diff << (isDiff ? " DIFFERS\n" : "\n");
+                   check << " and " << truth << " ; diff: " << diff 
+                   << (isDiff ? " DIFFERS\n" : "\n");
             }
         }
     }
