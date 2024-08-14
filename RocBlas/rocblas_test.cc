@@ -13,6 +13,7 @@
 #include <rocblas/rocblas.h>
 #include "common/example_utils.hpp"
 
+
 #define USE_BATCHED_GEMM 0
 
 #define CHK_ROCBLAS(error) if(error != rocblas_status_success) { \
@@ -104,6 +105,8 @@ struct BlasGemm
 
   template < class T >
   constexpr rocblas_datatype RocBlasType(const T *) {
+    if constexpr (std::is_same_v<T, _Float16>) 
+      return rocblas_datatype_f16_r;
     if constexpr (std::is_same_v<T, __half>) 
       return rocblas_datatype_f16_r;
     if constexpr (std::is_same_v<T, hip_bfloat16>) 
@@ -169,21 +172,41 @@ struct BlasGemm
            cfg.solutionIndex, cfg.flags))
   }
 
+  template < class TypeA, class TypeB, class TypeC, class Scalar >
+  void hgemm(const TypeA *dA, const TypeB *dB, TypeC *dC, Scalar alpha, 
+      Scalar beta, const Config& cfg) {
+
+    auto ha = (__half)alpha, hb = (__half)beta;
+    CHK_ROCBLAS(rocblas_hgemm(handle_,
+           cfg.transA, cfg.transB, cfg.M, cfg.N, cfg.K,
+           (rocblas_half *)&ha, dA, cfg.ldA,
+           dB, cfg.ldB, (rocblas_half *)&hb,
+           dC, cfg.ldC));
+  }
+
 private:
   rocblas_handle handle_; 
 };
 
+//./rocblas-bench -f gemm -r f16_r --transposeA N --transposeB N -m 1024 -n 1 -k 3224 --alpha 1 --lda 1024 --ldb 3224 --beta 0 --ldc 1024
+
 int main(int argc, char *argv[]) try
 {
+#if 1
+  using TypeA = __half;
+  using TypeB = __half;
+  using TypeC = __half;
+  using TypeD = __half;
+#else
   using TypeA = float;
   using TypeB = float;
   using TypeC = float;
   using TypeD = float;
-
-	int M = 600, N = 512, K = 300;
-  auto transA = rocblas_operation_transpose,
+#endif
+	int M = 1024, N = 1, K = 3224;
+  auto transA = rocblas_operation_none,
        transB = rocblas_operation_none;
-  TypeD alpha{1}, beta{0};
+  float alpha{1}, beta{0};
 
   int64_t batchCount = USE_BATCHED_GEMM ? 1000 : 1;
   BlasGemm gemm;
@@ -204,14 +227,30 @@ int main(int argc, char *argv[]) try
   HVector< TypeB > b(totalB);
   HVector< TypeC > c(totalC);
   HVector< TypeD > d(totalD), dHost(cfg.sizeD);
-
+#if 0
   initRange(a.data(), 1.0, 0.01, a.size());
   initRange(b.data(), 3.0, 0.5, b.size());
   initRange(c.data(), 1113.0, -0.5, c.size());
-
+#else
+  srand(111);
+  for (int i = 0; i < M * K; ++i) {
+    a[i] = TypeA(rand() / double(RAND_MAX) - 0.5);
+  }
+  
+  for (int i = 0; i < N * K; ++i){
+    b[i] = TypeB(rand() / double(RAND_MAX) - 0.5);
+  }
+  initRange(c.data(), 11.0, 0, c.size());
+  initRange(d.data(), 11.0, 0, d.size());
+  // size_t seed = 1;
+  // initRandomFloat(a.data(), -1.0, 1.0, a.size(), seed);
+  // initRandomFloat(b.data(), -1.0, 1.0, b.size(), seed);
+  //initRandomFloat(c.data(), -1.0, 1.0, c.size(), seed);
+#endif
   a.copyHToD();
   b.copyHToD();
   c.copyHToD();
+  d.copyHToD();
 
   int ofs = 5, mod = 8;
   uint32_t minT = 1000000, maxT = 0;
@@ -229,16 +268,18 @@ int main(int argc, char *argv[]) try
 #if !USE_BATCHED_GEMM
   //CPU_BEGIN_TIMING(gemm);    
 
-  auto sols = gemm.get_solutions_by_type(a.devPtr, d.devPtr, alpha);
+  //auto sols = gemm.get_solutions_by_type(a.devPtr, d.devPtr, alpha);
   
   //for(int sol = 0; sol < 100000; sol++) 
-  for(auto sol : sols)
+  //for(auto sol : sols)
+  int sol = -1;
   try {
     cfg.solutionIndex = sol;
-    cfg.algo = rocblas_gemm_algo_solution_index;
-    gemm.gemm_ex(a.devPtr, b.devPtr, c.devPtr, d.devPtr, 
-       alpha, beta, cfg);
-   VLOG("Testing with sol: " << sol << " succeeded!");
+    cfg.algo = rocblas_gemm_algo_standard;//rocblas_gemm_algo_solution_index;
+    gemm.gemm_ex(a.devPtr, b.devPtr, c.devPtr, d.devPtr, alpha, beta, cfg);
+    // gemm.hgemm((rocblas_half *)a.devPtr, (const rocblas_half *)b.devPtr, 
+    //      (rocblas_half *)d.devPtr, alpha, beta, cfg);
+     VLOG("Testing with sol: " << sol << " succeeded!");
   }
   catch(std::exception& ex) {
     //VLOG("Failed: " << ex.what());
@@ -256,18 +297,20 @@ int main(int argc, char *argv[]) try
 #endif // USE_BATCHED_GEMM
 //  } // for
 
-#if 0
+#if 1
+using TT = _Float16;
+//using TT = float;
   for(int i = 0; i < batchCount; i++) {
     matMatMultMixPrec(alpha, beta,
       M, N, K, 
-      a.data(), strideA1, strideA2,
-      b.data(), strideB1, strideB2,
-      c.data(), 1, ldc,
-      dHost.data(), 1, ldd);
+      a.data(), cfg.strideA1, cfg.strideA2,
+      b.data(), cfg.strideB1, cfg.strideB2,
+      c.data(), 1, cfg.ldC,
+      dHost.data(), 1, cfg.ldD);
 
-    TypeD eps = 1e-4;
-    checkme(d.data(), dHost.data(), d.size(), d.size(),
-        1, eps, true);
+    TT eps = 1e-4;
+    checkme((const TT *)d.data(), (const TT *)dHost.data(), d.size(), d.size(),
+         1, eps, true);
   }
 #endif        
   return 0;
