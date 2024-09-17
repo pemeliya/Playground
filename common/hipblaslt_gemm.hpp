@@ -74,6 +74,8 @@ inline std::ostream& operator<<(std::ostream& os, hipDoubleComplex Z) {
 
 template < class T >
 constexpr hipDataType HipBlasltType(const T *) {
+  if constexpr (std::is_same_v<T, _Float16>) 
+    return HIP_R_16F;
   if constexpr (std::is_same_v<T, __half>) 
     return HIP_R_16F;
   if constexpr (std::is_same_v<T, hip_bfloat16>) 

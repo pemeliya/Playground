@@ -63,11 +63,11 @@ int main(int argc, char *argv[]) try
 	int m = 40, n = 20, k = 30;
   float alpha{1.0}, beta{0.0};
 
-#if 0
-  using TypeA = hip_bfloat16;
-  using TypeB = hip_bfloat16;
-  using TypeC = hip_bfloat16;
-  using TypeD = hip_bfloat16;
+#if 1
+  using TypeA = _Float16;
+  using TypeB = _Float16;
+  using TypeC = _Float16;
+  using TypeD = _Float16;
 #else
   using TypeA = float;
   using TypeB = float;
@@ -96,6 +96,9 @@ int main(int argc, char *argv[]) try
   initRange(bias.data(), 1.0, 0.0, m);
 #endif
 
+  initRange(d1.data(), 0.0, 0.0, m*n);
+  initRange(d2.data(), 0.0, 0.0, m*n);
+
   a.copyHToD();
   b.copyHToD();
   c.copyHToD();
@@ -105,12 +108,12 @@ int main(int argc, char *argv[]) try
   BlasLtGemm::Config cfg{
     .trans_a = HIPBLAS_OP_N,
     .trans_b = HIPBLAS_OP_N,
-    .compute_type = HIPBLAS_COMPUTE_32F,
+    .compute_type = HIPBLAS_COMPUTE_32F_FAST_TF32,
     .m = m,
     .n = n,
     .k = k,
-    .epilogue = HIPBLASLT_EPILOGUE_BIAS,
-    .max_algorithms = 16,
+    .epilogue = HIPBLASLT_EPILOGUE_DEFAULT,
+    .max_algorithms = 2,
     .max_workspace_size = 1ull << 20,
     .stream = 0,
   };
@@ -131,14 +134,15 @@ int main(int argc, char *argv[]) try
     b.data(), 1, k, // n x k: (n, 1) or (1, k)
     c.data(), 1, m, // does not matter
     d1.data(), 1, m, 
-    bias.data()); // m x n: (n, 1)  or (1, m)
+    cfg.epilogue == HIPBLASLT_EPILOGUE_DEFAULT ? nullptr : bias.data()); // m x n: (n, 1)  or (1, m)
 #endif
 
+  using ZT = double;
   auto check_results = [&](const auto& truth, const auto& test, auto tolerance) {
     int nfailed = 0;
     for(size_t i = 0; i < m*n; i++) {
-      auto v1 = truth[i];
-      auto v2 = test[i];
+      auto v1 = (ZT)truth[i];
+      auto v2 = (ZT)test[i];
       if(!(std::isfinite(v1) == std::isfinite(v2) &&
           std::abs(v1 - v2) /
               (std::max(std::abs(v1), std::abs(v2)) + 1) < tolerance)) {
