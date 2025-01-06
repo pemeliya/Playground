@@ -1,0 +1,29 @@
+# load("@bazel_tools//tools/cpp:cc_toolchain_config.bzl", "cc_toolchain_config")
+
+# register_toolchai1ns("//crosstool:rocm-toolchain-suite")
+
+new_local_repository(
+    name = "rocm-repo",
+    path = "/opt/rocm",
+    build_file_content = """
+cc_library(
+    name = "hip",
+    hdrs = glob(["include/**/*.h"]),
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+)
+""",
+)
+
+
+new_local_repository(
+    name = "gpu-common",
+    path = "/data/Playground/",
+    build_file_content = """
+cc_library(
+    name = "includes",
+    hdrs = glob(["common/*.h", "common/*.hpp"]),
+    visibility = ["//visibility:public"],
+)
+""",
+)
