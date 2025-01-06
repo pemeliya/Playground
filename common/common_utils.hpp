@@ -46,35 +46,11 @@ class GpuTimer
     cudaEvent_t start;
     cudaEvent_t stop;
 public:
-    GpuTimer()
-    {
-        (void)cudaEventCreate(&start);
-        (void)cudaEventCreate(&stop);
-    }
-
-    ~GpuTimer()
-    {
-        (void)cudaEventDestroy(start);
-        (void)cudaEventDestroy(stop);
-    }
-
-    void Start()
-    {
-        (void)cudaEventRecord(start, 0);
-    }
-
-    void Stop()
-    {
-        (void)cudaEventRecord(stop, 0);
-    }
-
-    float ElapsedMillis()
-    {
-        float elapsed;
-        (void)cudaEventSynchronize(stop);
-        (void)cudaEventElapsedTime(&elapsed, start, stop);
-        return elapsed;
-    }
+    GpuTimer();
+    ~GpuTimer();
+    void Start();
+    void Stop();
+    float ElapsedMillis();
 };
 
 template < class NT >
@@ -160,20 +136,11 @@ struct MappedVector {
 
 struct GPUStream {
 
-  explicit GPUStream(int priority = 0) 
-  {
-    if (priority == 0) {
-      CHK(cudaStreamCreateWithFlags(&handle_, cudaStreamDefault)) 
-    } else {
-      CHK(cudaStreamCreateWithPriority(&handle_, cudaStreamDefault, priority))
-    }
-  }
+  explicit GPUStream(int priority = 0);
   cudaStream_t get() const {
     return handle_;
   }
-  ~GPUStream() {
-    (void)cudaStreamDestroy(handle_);
-  }
+  ~GPUStream();
 private:
   cudaStream_t handle_;
 };

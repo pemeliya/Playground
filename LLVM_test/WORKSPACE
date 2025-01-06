@@ -1,6 +1,6 @@
 # load("@bazel_tools//tools/cpp:cc_toolchain_config.bzl", "cc_toolchain_config")
 
-# register_toolchai1ns("//crosstool:rocm-toolchain-suite")
+# register_toolchains("//crosstool:rocm-toolchain-suite")
 
 new_local_repository(
     name = "rocm-repo",

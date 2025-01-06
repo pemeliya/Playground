@@ -8,6 +8,49 @@ XLogMessage::~XLogMessage() {
   fprintf(stderr, "[%s:%d] %s\n", fname_, line_, str().c_str());
 }
 
+GpuTimer::GpuTimer()
+{
+  (void)cudaEventCreate(&start);
+  (void)cudaEventCreate(&stop);
+}
+
+GpuTimer::~GpuTimer()
+{
+  (void)cudaEventDestroy(start);
+  (void)cudaEventDestroy(stop);
+}
+
+void GpuTimer::Start()
+{
+  (void)cudaEventRecord(start, 0);
+}
+
+void GpuTimer::Stop()
+{
+  (void)cudaEventRecord(stop, 0);
+}
+
+float GpuTimer::ElapsedMillis()
+{
+  float elapsed;
+  (void)cudaEventSynchronize(stop);
+  (void)cudaEventElapsedTime(&elapsed, start, stop);
+  return elapsed;
+}
+
+GPUStream::GPUStream(int priority) 
+{
+  if (priority == 0) {
+    CHK(cudaStreamCreateWithFlags(&handle_, cudaStreamDefault)) 
+  } else {
+    CHK(cudaStreamCreateWithPriority(&handle_, cudaStreamDefault, priority))
+  }
+}
+
+GPUStream::~GPUStream() {
+  (void)cudaStreamDestroy(handle_);
+}
+
 void DeviceInit(int dev)
 {
     int deviceCount;

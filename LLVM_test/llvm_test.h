@@ -18,10 +18,14 @@ struct TestFramework {
   TestFramework(const std::vector< size_t >& ofs);
   ~TestFramework();
 
+  void initialize_bufs();
+  void run();
+
 private:
-  std::vector< size_t > concat_ofs_;    // concatenate offsets
+  std::vector< size_t > concat_sizes_;    // concatenate offsets
   std::vector< Vector > src_bufs_;
   Vector dst_buf_;
+  std::vector< NT > ref_buf_; // reference solution
 };
 
 #endif // LLVM_TEST_H
