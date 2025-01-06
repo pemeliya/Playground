@@ -9,11 +9,12 @@ cc_library(
 
 cc_binary(
     name = "llvm_test",
-    srcs = ["llvm_test.cc"],
+    #hdrs = glob(["*.h"]),
+    srcs = glob(["*.h", "*.cc"]),
     copts = [],
     deps = [
         "@rocm-repo//:hip",
-        "@gpu-common//:includes",
+        "@gpu-common//:common",
         # Other dependencies here
     ],
 )

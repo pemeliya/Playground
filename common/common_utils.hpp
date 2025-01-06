@@ -27,56 +27,19 @@
  *
  ******************************************************************************/
 
-#ifndef EXAMPLES_EXAMPLE_UTILS_HPP
-#define EXAMPLES_EXAMPLE_UTILS_HPP
+#ifndef COMMON_UTILS_HPP
+#define COMMON_UTILS_HPP 1
 
 #include <vector>
 #include <cmath>
 #include <chrono>
+#include <iostream>
 #include <memory.h>
 #include "common/common.h"
 #include "common/mersenne.h"
 
 
-inline void DeviceInit(int dev = 0)
-{
-    int deviceCount;
-    CHK(cudaGetDeviceCount(&deviceCount));
-
-    if (deviceCount == 0) {
-        throw std::runtime_error("No devices supporting CUDA/HIP");
-    }
-
-    CHK(cudaSetDevice(dev));
-
-    std::size_t device_free_physmem = 0, device_total_physmem = 0;
-    CHK(cudaMemGetInfo(&device_free_physmem, &device_total_physmem)); // this fails on rocm-5.7.0
-
-    cudaDeviceProp deviceProp;
-
-    CHK(cudaGetDeviceProperties(&deviceProp, dev));
-    if (deviceProp.major < 1) {
-        throw std::runtime_error("Device does not support CUDA/HIP");
-    }
-
-    auto device_giga_bandwidth = float(deviceProp.memoryBusWidth) * deviceProp.memoryClockRate * 2 / 8 / 1000 / 1000;
-    {
-        //printf("%llu --- %llu\n", device_free_physmem, device_total_physmem);
-        printf("Using device %d: %s ( SM%d, %d SMs, "
-                        "%lld free / %lld total MB physmem, "
-                        "%.3f GB/s @ %d kHz mem clock, ECC %s)\n",
-                    dev,
-                    deviceProp.name,
-                    deviceProp.major * 100 + deviceProp.minor * 10,
-                    deviceProp.multiProcessorCount,
-                    (unsigned long long) device_free_physmem / 1024 / 1024,
-                    (unsigned long long) device_total_physmem / 1024 / 1024,
-                    device_giga_bandwidth,
-                    deviceProp.memoryClockRate,
-                    (deviceProp.ECCEnabled) ? "on" : "off");
-        fflush(stdout);
-    }
-}
+void DeviceInit(int dev = 0);
 
 class GpuTimer
 {
@@ -119,16 +82,28 @@ struct HVector : std::vector< NT > {
    
    using Base = std::vector< NT >;
 
-   HVector(Base&& b) : Base(std::move(b)) {
-       CHK(cudaMalloc((void**)&devPtr, Base::size()*sizeof(NT)))
-   }
+//    HVector(Base&& b) noexcept : Base(std::move(b)) {
+//        CHK(cudaMalloc((void**)&devPtr, Base::size()*sizeof(NT)))
+//    }
 
    HVector() = default;
 
    HVector(const HVector&) = delete;
    HVector& operator=(const HVector&) = delete;
 
-   void swap(HVector& lhs) {
+   HVector(HVector&& rhs) noexcept : Base(std::move(rhs)) {
+     devPtr = rhs.devPtr;
+     rhs.devPtr = nullptr;
+   }
+
+   HVector& operator=(HVector&& rhs) noexcept {
+     Base::operator=(std::move(rhs));
+     devPtr = rhs.devPtr;
+     rhs.devPtr = nullptr;
+     return *this;
+   }
+
+   void swap(HVector& lhs) noexcept {
     std::swap(devPtr, lhs.devPtr);
     this->swap(lhs);
    }
@@ -343,4 +318,4 @@ void RandomBits(
     }
 }
 
-#endif
+#endif // COMMON_UTILS_HPP

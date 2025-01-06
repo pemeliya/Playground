@@ -78,9 +78,18 @@
 #define FORCEINLINE __forceinline__
 #endif
 
-#define VLOG(x) std::cerr << x << std::endl;
+struct XLogMessage : public std::basic_ostringstream<char> {
+  XLogMessage(const char* fname, int line, int severity);
+  ~XLogMessage();
+private:
+  const char *fname_;
+  int line_;
+};
+
+#define VLOG(severity) XLogMessage(__FILE__, __LINE__, severity)
+
 #define PRINTZ(fmt, ...) fprintf(stderr, fmt"\n", ##__VA_ARGS__)
-#define BUGTRACE std::cerr << std::this_thread::get_id() << ": " << __FILE__":" << __LINE__ << std::endl;
+#define BUGTRACE VLOG(0) << std::this_thread::get_id() << " OK";
 
 #define CHK(x) if(auto res = (x); res != cudaSuccess) { \
   ThrowError<256>(#x " failed with: '%s'(%d) at %s:%d\n", cudaGetErrorString(res),  \

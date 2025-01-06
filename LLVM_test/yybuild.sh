@@ -13,12 +13,20 @@ export CXX=$ROCM_PATH/lib/llvm/bin/clang++
 if [ "$1" = "clean" ]; then
   echo "------------ cleaning ----------------"
   $BAZEL clean
+  shift 1
 fi
 
 if [ "$1" = "clean0" ]; then
   echo "------------ full cleaning ----------------"
   $BAZEL clean --expunge
+  shift 1
 fi
+
+GDB=
+if [ "$1" = "g" ]; then
+  GDB="rocgdb --args "
+  shift 1
+fi 
 
         # --config=release \
         # --subcommands \
@@ -27,3 +35,5 @@ fi
 $BAZEL --output_base=/data/bazel_llvm_test \
          build --config rocm --config release \
          //:llvm_test 2>&1 | tee build.out
+
+$GDB ./bazel-bin/llvm_test 2>&1 | tee test.out

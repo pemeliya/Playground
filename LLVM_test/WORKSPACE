@@ -21,9 +21,11 @@ new_local_repository(
     path = "/data/Playground/",
     build_file_content = """
 cc_library(
-    name = "includes",
+    name = "common",
     hdrs = glob(["common/*.h", "common/*.hpp"]),
+    srcs = glob(["common/*.cc"]),
     visibility = ["//visibility:public"],
+    deps = ["@rocm-repo//:hip"],
 )
 """,
 )
