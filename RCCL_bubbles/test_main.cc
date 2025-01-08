@@ -6,7 +6,7 @@
 #include <numeric>
 #include <random>
 #include "common/threading.hpp"
-#include "common/example_utils.hpp"
+#include "common/common_utils.hpp"
 #include "common/roc_profiler.h"
 
 #include "test_main.h"
@@ -34,7 +34,7 @@ TestFramework::TestFramework(size_t nGpus, const uint32_t *gpuIDs,
 
   m_pool.runJob([this, gpuIDs](int id) {
 
-     VLOG("initializing rank " << id);
+     VLOG(0) << "initializing rank " << id;
     auto& info = m_infos[id];
     size_t nBytes = m_maxElems*sizeof(T);
     info.gpuId = gpuIDs != nullptr ? gpuIDs[id] : id;
@@ -56,7 +56,7 @@ TestFramework::TestFramework(size_t nGpus, const uint32_t *gpuIDs,
     init_gemm_op(id);
   }); // runJob
   CHK(cudaDeviceSynchronize());
-    VLOG("Init finished..");
+    VLOG(0) << "Init finished..";
 }
 
 TestFramework::~TestFramework() {
@@ -113,7 +113,7 @@ void TestFramework::verify(int id) {
   CHK(cudaMemcpy(dst, m_infos[id].recvBuf, sz*sizeof(T), cudaMemcpyDeviceToHost));
 // #if TEST_COLLECTIVE_PERMUTE
   // auto t = (id - 1 + m_nGpus) % m_nGpus;
-  // VLOG("Device " << id << " verifying: expecting data from: " << t);
+  // VLOG(0) << "Device " << id << " verifying: expecting data from: " << t;
   // for(uint32_t j = 0, num = 0; j < m_curElems; j++) {
   //   auto truth = getElement(t, j);
   //   if(dst[j] != truth) {
@@ -171,7 +171,7 @@ void TestFramework::run_rccl_op(int id, int iter)
 
 void TestFramework::init_gemm_op(int id) {
   	
-  VLOG("Init gemm for rank: " << id);
+  VLOG(0) << "Init gemm for rank: " << id;
   auto& gemm = m_infos[id].gemm;
 
   int M = 600, N = 512, K = 300;
@@ -198,7 +198,7 @@ void TestFramework::run_thread(int id, int numIters, bool verifyData)
 #if USE_GRAPH_API
   if(!info.graphCreated) {
 
-    VLOG("Starting stream capture.." << numIters);
+    VLOG(0) << "Starting stream capture.." << numIters;
     //CHK(cudaGraphCreate(&info.graph, /*flags=*/0));
 
     CHK(cudaStreamBeginCapture(info.stream, cudaStreamCaptureModeThreadLocal));
@@ -211,7 +211,7 @@ void TestFramework::run_thread(int id, int numIters, bool verifyData)
     }
     CHK(cudaStreamEndCapture(info.stream, &info.graph));
 
-    VLOG("Starting stream capture to existing graph..");
+    VLOG(0) << "Starting stream capture to existing graph..";
     CHK(cudaStreamBeginCaptureToGraph(info.stream, info.graph,
             nullptr, nullptr, 0, cudaStreamCaptureModeThreadLocal));
     for(int i = 0; i < numIters-1; i++) {
@@ -221,7 +221,7 @@ void TestFramework::run_thread(int id, int numIters, bool verifyData)
     }
     cudaGraph_t graph;
     CHK(cudaStreamEndCapture(info.stream, &graph));
-    VLOG("graph " << graph << " --- " << info.graph);
+    VLOG(0) << "graph " << graph << " --- " << info.graph;
     if(graph != info.graph) {
       ThrowError<>("Graphs differ!");
     }
@@ -235,7 +235,7 @@ void TestFramework::run_thread(int id, int numIters, bool verifyData)
 #else
   CPU_BEGIN_TIMING(T); 
   for(int i = 0; i < numIters; i++) {
-    //VLOG("\n============================ " << m_curElems << " =============================\n");
+    //VLOG(0) << "\n============================ " << m_curElems << " =============================\n";
     run_gemm_op(id, 2);
     run_rccl_op(id, i);
     run_rccl_op(id, i+1);
@@ -337,8 +337,8 @@ int main() try
   runRCCLTest(NUM_ELEMS_MIN, NUM_ELEMS_MIN);
 }
 catch(std::exception& ex) {
-  VLOG("Exception: " << ex.what());
+  VLOG(0) << "Exception: " << ex.what();
 }
 catch(...) {
-  VLOG("Unknown exception");
+  VLOG(0) << "Unknown exception";
 }

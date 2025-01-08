@@ -90,7 +90,7 @@ struct ThreadPool {
       if(th.joinable())
         th.join();
     }
-    VLOG("Thread pool joined");
+    VLOG(0) << "Thread pool joined";
   }
   catch(...) {
     PRINTZ("Exception when destroying thread pool!");
@@ -105,7 +105,7 @@ private:
     while(m_isRunning) 
     try
     {
-      // VLOG("My job ID: " << localJobId);
+      // VLOG(0) << "My job ID: " << localJobId;
       {
         std::unique_lock lock(m_jobMtx); 
         m_jobCv.wait(lock, [this, &localJobId]() 
@@ -118,12 +118,12 @@ private:
       std::lock_guard _(m_finishedMtx);
       if(++m_arrived == m_currentJobID) {
         m_func = nullptr;
-        // VLOG("JOB finished: " << m_currentJobID);
+        // VLOG(0) << "JOB finished: " << m_currentJobID;
         m_finishedCv.notify_one(); // last thread notifies about finished job
       }
     }
     catch(std::exception& ex) {
-      VLOG("Thread exception: " << ex.what());
+      VLOG(0) << "Thread exception: " << ex.what();
       m_isRunning = false, m_threadException = true;
       m_jobCv.notify_all();
       m_finishedCv.notify_one();

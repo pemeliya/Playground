@@ -8,7 +8,7 @@
 #include <numeric>
 #include <random>
 #include "common/threading.hpp"
-#include "common/example_utils.hpp"
+#include "common/common_utils.hpp"
 #include "common/roc_profiler.h"
 
 #include "test_main.h"
@@ -45,7 +45,7 @@ TestFramework::TestFramework(size_t nGpus, const uint32_t *gpuIDs,
 { 
 #if !USE_DEBUG_CONFIG_3_GPUS
   if(m_nExtraPeers >= m_nGpus-1) {
-    VLOG("Wrong number of extra peers!");
+    VLOG(0) << "Wrong number of extra peers!";
     throw std::runtime_error("Wrong number of extra peers!");
   }
   if(m_nExtraPeers == 0) m_splitFactor = 1.0; 
@@ -145,7 +145,7 @@ void TestFramework::verify(int id) {
 #endif
 
 #if TEST_ALL_TO_ALL
-  VLOG("Device " << id << " verifying outputs..");
+  VLOG(0) << "Device " << id << " verifying outputs..";
   uint32_t chunk_len = m_curElems / m_nGpus;
   // device ID: gets id's chunk from all devices  
   for(uint32_t j = 0, num = 0; j < m_curElems; j++) {
@@ -157,7 +157,7 @@ void TestFramework::verify(int id) {
     }
   }
 #else
-  VLOG("Device " << id << " verifying: expecting data from: " << t);
+  VLOG(0) << "Device " << id << " verifying: expecting data from: " << t;
   for(uint32_t j = 0, num = 0; j < m_curElems; j++) {
     auto truth = getElement(t, j);
     if(dst[j] != truth) {
@@ -316,7 +316,7 @@ void TestFramework::run_thread(int id, int numIters, bool verifyData)
 
   CPU_BEGIN_TIMING(T);
   for(int i = 0; i < numIters; i++) {
-    //VLOG("\n============================ " << m_curElems << " =============================\n");
+    //VLOG(0) << "\n============================ " << m_curElems << " =============================\n";
     run_single_gpu(id);
     CHK(cudaStreamSynchronize(info.stream));
     // std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -414,8 +414,8 @@ int main() try
   runRCCLTest(NUM_ELEMS_MIN, NUM_ELEMS_MAX);
 }
 catch(std::exception& ex) {
-  VLOG("Exception: " << ex.what());
+  VLOG(0) << "Exception: " << ex.what();
 }
 catch(...) {
-  VLOG("Unknown exception");
+  VLOG(0) << "Unknown exception";
 }

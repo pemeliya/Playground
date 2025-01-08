@@ -318,13 +318,13 @@ RocProfilerSession::RocProfilerSession() {
 
 void RocProfilerSession::start() {
   CHECK_ROCPROFILER(rocprofiler_start_session(session_id));
-  VLOG("Profiling session started..");
+  VLOG(0) << "Profiling session started..";
 }
 
 void RocProfilerSession::stop() {
-  VLOG("Profiling session stopping..");
+  VLOG(0) << "Profiling session stopping..";
   CHECK_ROCPROFILER(rocprofiler_terminate_session(session_id));
-  VLOG("Profiling session stopped..");
+  VLOG(0) << "Profiling session stopped..";
 }
 
 RocProfilerSession::~RocProfilerSession() try {
@@ -342,5 +342,5 @@ RocProfilerSession::~RocProfilerSession() try {
   CHECK_ROCPROFILER(rocprofiler_finalize());
 }
 catch(std::exception& ex) {
-  VLOG("ZException: " << ex.what());
+  VLOG(0) << "ZException: " << ex.what();
 }

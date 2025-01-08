@@ -66,7 +66,7 @@ void TestFramework::run() {
   Slice s2{ .src = (const uint8_t *)src_bufs_[1].devPtr, 
             .bytes = (uint32_t)(src_bufs_[1].size() * sizeof(NT))};
 
-  size_t total = dst_buf_.size();
+  size_t total = ref_buf_.size(); // NOTE dst_buf_.size() is different !! (OOB)
   VLOG(0) << "Total concat elements: " << total;
   constexpr uint32_t BlockSz = 128;
   size_t nBlocks = (total + BlockSz - 1) / BlockSz;

@@ -12,7 +12,7 @@ TestFramework::TestFramework(const std::vector< size_t >& offsets) :
     total += sz;
   }
   VLOG(0) << "Allocating device buf of " << total * sizeof(NT) << " bytes";
-  dst_buf_ = Vector(total);
+  dst_buf_ = Vector(total + s_redzoneElems);
   ref_buf_.resize(total);
 }
 
@@ -31,6 +31,24 @@ void TestFramework::initialize_bufs() {
     z++, ptr += buf.size();
     buf.copyHToD();  // copy to device
   }
+  // guard for OOB detection
+  cudaMemset(dst_buf_.devPtr + ref_buf_.size(), 
+                s_oobValue, s_redzoneElems*sizeof(NT));
+}
+
+void TestFramework::verify() {
+  dst_buf_.copyDToH();
+
+  checkme< false >(dst_buf_.data(), ref_buf_.data(), 
+        ref_buf_.size(), ref_buf_.size(), 1,
+        NT(1e-10), 
+        /*print_when_differs*/true, 
+        /*print_max*/1000);
+
+  auto ptr = (const uint8_t *)(dst_buf_.data() + ref_buf_.size());
+  for (uint32_t i = 0; i < s_redzoneElems; i++) {
+    if 
+  }
 }
 
 int main() try {
@@ -40,11 +58,12 @@ int main() try {
     TestFramework test({100, 200});
     test.initialize_bufs();
     test.run();
+    test.verify();
 
     return 0;
 }
 catch(std::exception& ex) {
-  VLOG(0) << "Exception: " << ex.what();
+  VLOG(0) << 0) << "Exception: " << ex.what(;
   return 1;
 }
 catch(...) {

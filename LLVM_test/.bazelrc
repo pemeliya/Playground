@@ -5,8 +5,6 @@ build --copt=-Wall --copt=-Wextra --verbose_failures
 #build:rocm --action_env=CC="/opt/rocm/llvm/bin/amdclang"
 #build:rocm --action_env=CXX="/opt/rocm/llvm/bin/amdclang++"
 
-# /opt/rocm-6.3.0.1/lib/llvm/bin/clang++ -DCOMPILE_FOR_ROCM=1 -D_USE_MATH_DEFINES -D__HIP_ROCclr__=1 -I/data/Playground/RCCL_bubbles/.. -std=gnu++20 --offload-arch=gfx942 -o CMakeFiles/RCCL_bubbles.dir/test_main.cc.o -x hip -c /data/Playground/RCCL_bubbles/test_main.cc
-
 # build:rocm --crosstool_top=//crosstool:rocm-toolchain-suite
 build:rocm --copt=-D__HIP_PLATFORM_AMD__ --copt=-DCOMPILE_FOR_ROCM=1 --copt=--offload-arch=gfx942 
 build:rocm --copt=-D__HIP_ROCclr__=1 --copt -xhip
@@ -16,9 +14,3 @@ build:rocm --linkopt=-lamdhip64 --linkopt=-L/opt/rocm/lib
 
 build:release --copt=-O3 --copt=-DNDEBUG 
 build:debug --copt=-O2 --copt=-g
-
-# /opt/rocm/llvm/bin/amdclang++ -DCOMPILE_FOR_ROCM=1 -D_USE_MATH_DEFINES \
-#         -D__HIP_ROCclr__=1 -I.. -O3 -DNDEBUG -std=gnu++20 \
-#          \
-#         -mllvm=-amdgpu-function-calls=false -D__HIP_PLATFORM_AMD__ \
-#         $@

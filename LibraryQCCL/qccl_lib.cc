@@ -12,7 +12,7 @@
 #include "qccl_lib.h"
 #include "buffer_addressing.hpp"
 #include "common/threading.hpp"
-#include "common/example_utils.hpp"
+#include "common/common_utils.hpp"
 
 // AMDGPU docs https://llvm.org/docs/AMDGPU/
 
@@ -166,7 +166,7 @@ public:
     CHK(hipOccupancyMaxActiveBlocksPerMultiprocessor(&nBlocks, 
       rcclKernel<s_numWorkThreads, s_numRegsPerThread>, s_numWorkThreads, 
       sizeof(WorkInfo)));
-    VLOG("Max blocks per SM: " << nBlocks);
+    VLOG(0) << "Max blocks per SM: " << nBlocks;
 #endif
     return QCCL_Result::OK;
   }

@@ -11,7 +11,7 @@
 #include <memory>
 #include <iostream>
 #include <rocblas/rocblas.h>
-#include "common/example_utils.hpp"
+#include "common/common_utils.hpp"
 
 #define USE_BATCHED_GEMM 0
 
@@ -132,7 +132,7 @@ struct BlasGemm
           RocBlasType(&alpha), 0, nullptr, &num_sols));
 
     std::vector< int32_t > sols(num_sols);
-    VLOG("Found solutions: " << num_sols);
+    VLOG(0) << "Found solutions: " << num_sols;
 
     CHK_ROCBLAS(rocblas_gemm_ex_get_solutions_by_type(
       handle_, RocBlasType(dA), RocBlasType(dD), 
@@ -238,10 +238,10 @@ int main(int argc, char *argv[]) try
     cfg.algo = rocblas_gemm_algo_solution_index;
     gemm.gemm_ex(a.devPtr, b.devPtr, c.devPtr, d.devPtr, 
        alpha, beta, cfg);
-   VLOG("Testing with sol: " << sol << " succeeded!");
+   VLOG(0) << "Testing with sol: " << sol << " succeeded!";
   }
   catch(std::exception& ex) {
-    //VLOG("Failed: " << ex.what());
+    //VLOG(0) << "Failed: " << ex.what();
   }
 
   d.copyDToH();
@@ -273,8 +273,8 @@ int main(int argc, char *argv[]) try
   return 0;
 }
 catch(std::exception& ex) {
-  VLOG("Exception: " << ex.what());
+  VLOG(0) << "Exception: " << ex.what();
 }
 catch(...) {
-  VLOG("Unknown exception");
+  VLOG(0) << "Unknown exception";
 }

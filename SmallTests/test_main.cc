@@ -7,7 +7,7 @@
 #include <iostream>
 #include <numeric>
 #include <random>
-//#include "common/example_utils.hpp"
+//#include "common/common_utils.hpp"
 #include <hip/hip_runtime.h>
 
 #define VLOG(x) std::cerr << x
@@ -43,9 +43,9 @@ int main() try
   CHK(hipMemcpy(vec0.data(), ptr0, bytes, hipMemcpyDeviceToHost));
 
   for(auto v : vec0) {
-    VLOG("v = " << v << '\n');
+    VLOG(0) << "v = " << v << '\n';
   }
 }
 catch(std::exception& ex) {
-  VLOG("Exception: " << ex.what());
+  VLOG(0) << "Exception: " << ex.what();
 }

@@ -13,13 +13,14 @@ struct TestFramework {
   constexpr static uint32_t s_bogus = 0xFFFFFFFFu; // to catch uninitialized entries
   constexpr static uint8_t s_fillValue = 0xAA;
   constexpr static uint8_t s_oobValue = 0xDD;
-  constexpr static uint32_t s_redzoneElems = 64; // number of OOB elements for redzone check
+  constexpr static uint32_t s_redzoneElems = 256; // number of OOB elements for redzone check
 
   TestFramework(const std::vector< size_t >& ofs);
   ~TestFramework();
 
   void initialize_bufs();
   void run();
+  void verify();
 
 private:
   std::vector< size_t > concat_sizes_;    // concatenate offsets

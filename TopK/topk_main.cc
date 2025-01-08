@@ -6,7 +6,7 @@
 #include <iostream>
 #include <random>
 #include "topk_kernel.h"
-#include "common/example_utils.hpp"
+#include "common/common_utils.hpp"
 
 size_t NumThreadsNew(size_t n, size_t k, size_t batch_size) 
 {
@@ -30,7 +30,7 @@ size_t NumThreads(size_t n, size_t k, size_t batch_size) {
       std::min(512 * (16 / k), kTopKMaxThreadsPerBlock);
   // Minimum amount of data that each thread needs to receive for the algorithm.
   size_t min_slice = std::bit_floor(n / std::bit_ceil(k));
-  VLOG("threads_per_block, min_slice: " << threads_per_block << ',' << min_slice);
+  VLOG(0) << "threads_per_block, min_slice: " << threads_per_block << ',' << min_slice;
   return std::min(threads_per_block, min_slice);
 }
 
@@ -48,17 +48,17 @@ struct TopkArgs {
 void calcOccupancy(const void *kernel) {
   size_t dynSHMem = 0;
   CHK(cudaOccupancyAvailableDynamicSMemPerBlock(&dynSHMem, kernel, 4, 512)); 
-  VLOG("Shared mem available: " << (double)dynSHMem/1024.0 << "KB" );
+  VLOG(0) << "Shared mem available: " << (double)dynSHMem/1024.0 << "KB" ;
 
   int numBlocks = 0;
   CHK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&numBlocks, 
       kernel, 512, 24*1024));
-  VLOG("Max active blocks: " << numBlocks);
+  VLOG(0) << "Max active blocks: " << numBlocks;
 
   int minGridSize = 0, blockSize = 0;
   CHK(cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, kernel, 
       32*1024, 512));
-  VLOG("minGridSize: " << minGridSize << " potential BlockSize: " << blockSize);
+  VLOG(0) << "minGridSize: " << minGridSize << " potential BlockSize: " << blockSize;
 }
 
 template <typename T>
@@ -181,5 +181,5 @@ int main() try
   }
 }
 catch(std::exception& ex) {
-  VLOG("Exception: " << ex.what());
+  VLOG(0) << "Exception: " << ex.what();
 }

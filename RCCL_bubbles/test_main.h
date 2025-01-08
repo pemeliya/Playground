@@ -9,7 +9,7 @@
 #include <hip/hip_complex.h>
 #include <rocblas/rocblas.h>
 
-#include "common/example_utils.hpp"
+#include "common/common_utils.hpp"
 #include "common/threading.hpp"
 
 #define CHK_ROCBLAS(error) if(error != rocblas_status_success) { \

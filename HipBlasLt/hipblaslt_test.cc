@@ -10,7 +10,7 @@
 #include <random>
 #include <optional>
 
-#include "common/example_utils.hpp"
+#include "common/common_utils.hpp"
 #include "common/hipblaslt_gemm.hpp"
 
 #define LOG(x) std::cerr << x << std::endl
@@ -115,7 +115,7 @@ int main(int argc, char *argv[]) try
     .stream = 0,
   };
 
-  VLOG("Running algorithm default");
+  VLOG(0) << "Running algorithm default";
   auto plan = gemm.createPlan(a.devPtr, b.devPtr, c.devPtr, bias.devPtr,
       d1.devPtr, alpha, beta, cfg);
 
@@ -144,7 +144,7 @@ int main(int argc, char *argv[]) try
               (std::max(std::abs(v1), std::abs(v2)) + 1) < tolerance)) {
         nfailed++;
         if(nfailed < 10) {
-          VLOG(i << ": truth: " << v1 << " gpu: " << v2 << " diff: " << (v1 - v2));
+          VLOG(0) << i << ": truth: " << v1 << " gpu: " << v2 << " diff: " << (v1 - v2);
         } else 
           return false;
       }
@@ -167,10 +167,10 @@ int main(int argc, char *argv[]) try
     auto OK = check_results(d1, d2, tolerance);
     auto [index, fallback] = gemm.getAlgoIndex(algos[i]);
     if(!OK) {
-      VLOG(i << ": algorithm " << index << " accuracy mismatch vs CPU algorithm!");
+      VLOG(0) << i << ": algorithm " << index << " accuracy mismatch vs CPU algorithm!";
       totalFailed++;
     } else {
-      VLOG(i << ": algorithm " << index << " OK");
+      VLOG(0) << i << ": algorithm " << index << " OK";
     }
   }
   VLOG("Accuracy check failed for " << totalFailed << " out of " 

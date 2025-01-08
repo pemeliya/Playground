@@ -5,7 +5,7 @@
 #include <random>
 
 #include "common/gpu_prim.h"
-#include "common/example_utils.hpp"
+#include "common/common_utils.hpp"
 
 //! hipcc -std=c++17 -O3 benchmark.cc --offload-arch=gfx90a
 //---------------------------------------------------------------------
@@ -82,7 +82,7 @@ template < class KeyT >
 void benchmark_reduce(const char *name, const std::vector< float >& input) {
 
     auto num_items = input.size();
-    //VLOG(name << " reducting of " << num_items  << " elements");
+    //VLOG(0) << name << " reducting of " << num_items  << " elements";
     HVector<KeyT> keys_in(num_items), keys_out(16);
 
      //std::mt19937 e2(111);
@@ -114,7 +114,7 @@ void benchmark_reduce(const char *name, const std::vector< float >& input) {
 
   keys_out.copyDToH();
 
-  VLOG("gpu: " << keys_out[0] << " truth: " << reduceF);
+  VLOG(0) << "gpu: " << keys_out[0] << " truth: " << reduceF;
 
 }
 

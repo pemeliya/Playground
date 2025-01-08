@@ -38,7 +38,7 @@ void TestFramework::init_extra_peers() {
 
   auto permute = permute_op();
   for(uint32_t i = 0; i < m_nGpus; i++) {
-    //VLOG(i << " permute: " << permute[i]);
+    //VLOG(0) << i << " permute: " << permute[i];
     m_commGraph[i][0].out = permute[i];  // gpu i sends to gpu permute[i]
     m_commGraph[permute[i]][0].in = i;   // gpu permute[i] receives from gpu i
   }
@@ -49,7 +49,7 @@ void TestFramework::init_extra_peers() {
 
     auto t = m_commGraph[i][0].out; // target node for GPU i
     // iterate until all outgoing links for GPU i are filled
-    // VLOG("Examining " << i << " -> " << t);
+    // VLOG(0) << "Examining " << i << " -> " << t;
 #if 1
     for(uint32_t jc = i + 1, n = 1; 
                          jc < 500 && n <= m_nExtraPeers; jc++) {
@@ -67,7 +67,7 @@ void TestFramework::init_extra_peers() {
       if(m_commGraph[j][n].in != s_bogus)
         continue;
       
-      // VLOG("Found " << n << "th gateway " << i << "," << j << "," << t); 
+      // VLOG(0) << "Found " << n << "th gateway " << i << "," << j << "," << t; 
       // increase the number of nodes processed
       // use node j as a gateway to send data from i to t
       auto z = n++;
@@ -86,9 +86,9 @@ void TestFramework::init_extra_peers() {
     m_commGraph[t][z].out = t;  // node t saves z-th piece to itself
 #endif
   } // for i m_nGpus
-  VLOG("Legend: GPU x send: (i,j): gpu[x] receives from gpu[i] and sends to gpu[j]");
+  VLOG(0) << "Legend: GPU x send: (i,j): gpu[x] receives from gpu[i] and sends to gpu[j]";
   for(uint32_t i = 0; i < m_nGpus; i++) { 
-    VLOG("GPU " << i << " send: " << m_commGraph.printRow(i));
+    VLOG(0) << "GPU " << i << " send: " << m_commGraph.printRow(i);
   }
   for(const auto& a : m_commGraph) {
     if(a.in == s_bogus || a.out == s_bogus) {

@@ -4,9 +4,6 @@ export USE_BAZEL_VERSION=6.5.0
 NUM=$#
 BAZEL=bazel
 ROCM_PATH=$(realpath /opt/rocm)
-#export CC=$(realpath /opt/rocm/llvm/bin/amdclang)
-#export CXX=$(realpath /opt/rocm/llvm/bin/amdclang++)
-
 export CC=$ROCM_PATH/lib/llvm/bin/clang
 export CXX=$ROCM_PATH/lib/llvm/bin/clang++
 
