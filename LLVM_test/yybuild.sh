@@ -1,4 +1,6 @@
 #!/bin/sh
+set -e
+set -o pipefail
 export USE_BAZEL_VERSION=6.5.0
 
 NUM=$#
@@ -31,6 +33,7 @@ fi
 
 $BAZEL --output_base=/data/bazel_llvm_test \
          build --config rocm --config release \
-         //:llvm_test 2>&1 | tee build.out
+         //:llvm_test \
+         2>&1 | tee build.out
 
 $GDB ./bazel-bin/llvm_test 2>&1 | tee test.out
