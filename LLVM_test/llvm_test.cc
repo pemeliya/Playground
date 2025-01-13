@@ -13,7 +13,8 @@ TestFramework::TestFramework(size_t num_rows, const std::vector< size_t >& conca
     concat_num_cols_ += sz;
   }
   auto total = concat_num_cols_ * num_rows_;
-  VLOG(0) << "Allocating device buf of " << total * sizeof(NT) << " bytes";
+  double Mb = (double)(total * sizeof(NT)) / (1<<20);
+  VLOG(0) << "Allocating output buf of " << Mb << " Mb";
   dst_buf_ = Vector(total + s_redzoneElems);
   ref_buf_.resize(total);
 }
@@ -85,7 +86,7 @@ void TestFramework::verify() {
 int main() try {
 
     DeviceInit();
-    TestFramework test(22220, {400, 700});
+    TestFramework test(22220, {400, 700, 1111});
     test.initialize_bufs();
     test.run_naive_concat();
     test.verify();

@@ -37,7 +37,21 @@ template < class NT >
 struct Slice {
   const NT *src;
   uint32_t elems_per_row;
-  uint32_t total;
+  union {
+    uint32_t total;
+    uint32_t col;   // just another name for the field
+  };
+};
+
+template < class NT >
+struct XSlice {
+  const NT *src;
+  uint32_t elems_per_row;
+  uint32_t idx_new;
+  union {
+    uint32_t total;
+    uint32_t col;   // just another name for the field
+  };
 };
 
   // [3,1] + [3,4] + [3,3] = [3,7]
@@ -46,27 +60,20 @@ struct Slice {
   // C   AAAA   BBB   CAAAABBB
 
 template < class NT, class TSlice, class ...Slices >
-__device__ void naive_kernel_block(const uint32_t idx,
-            const uint32_t col_ofs,
-            const uint32_t elems_per_row, 
-            NT * __restrict__ g_dst, TSlice s1, Slices... rest) {
+__device__ XSlice<NT> concat_seq_load_block(const uint32_t idx,
+            const uint32_t col_ofs, TSlice s, Slices... rest) {
 
   static_assert(std::is_same_v<TSlice, Slice<NT>>,
       "Slices must be of predefined type!");
 
-  const uint32_t idx2 = idx - s1.total;
-  if ((int32_t)idx2 < 0) {
-    auto *src = (const NT * __restrict__)(s1.src + idx);
-    NT val = LOAD(src);
-    uint32_t row = idx / s1.elems_per_row,
-             col = idx - row * s1.elems_per_row;
-    auto ptr = g_dst + row*elems_per_row + col + col_ofs;
-    STORE(val, ptr);
-    return;
-  }
-  if constexpr(sizeof...(Slices) != 0) {
-    naive_kernel_block(idx2, col_ofs + s1.elems_per_row, 
-            elems_per_row, g_dst, rest...);
+  if constexpr(sizeof...(Slices) == 0) {
+    return XSlice<NT>{ s.src, s.elems_per_row, idx, {col_ofs} };
+  } else {
+    const uint32_t idx2 = idx - s.total;
+    if ((int32_t)idx2 < 0) {
+      return XSlice<NT>{ s.src, s.elems_per_row, idx, {col_ofs} };
+    }
+    return concat_seq_load_block<NT>(idx2, col_ofs + s.elems_per_row, rest...);
   }
 }
 
@@ -74,52 +81,48 @@ template < uint32_t BlockSz, class NT, class ...Slices >
 __launch_bounds__(BlockSz, 4)
 __global__ void concat_naive_seq_load( 
             const uint32_t elems_per_row, 
+            const uint32_t total_elems, 
             NT * __restrict__ g_dst, Slices... rest) { 
   
   const uint32_t bidx = blockIdx.x, tid = threadIdx.x;
   const uint32_t idx = bidx * BlockSz + tid;
+  if (idx >= total_elems) return;
 
   // trying sequential load, strided store..
-  naive_kernel_block(idx, 0, elems_per_row, g_dst, rest...);
+  auto S = concat_seq_load_block<NT>(idx, 0, rest...);
+  auto *src = (const NT * __restrict__)(S.src + S.idx_new);
+  NT val = LOAD(src);
+  uint32_t row = S.idx_new / S.elems_per_row,
+           col = S.idx_new - row * S.elems_per_row;
+  auto ptr = g_dst + row*elems_per_row + col + S.col;
+  STORE(val, ptr);
 }
 
 
-// template < class NT, class TSlice, class ...Slices >
-// __kernel__ void concat_seq_store_block(const uint32_t idx,
-//             const uint32_t col_ofs,
-//             const uint32_t elems_per_row, 
-//             NT * __restrict__ g_dst, TSlice s1, Slices... rest) {
+template < class NT, class TSlice, class ...Slices >
+__device__ Slice<NT> concat_seq_store_block(const uint32_t col,
+            TSlice s, Slices... rest) {
 
-//   static_assert(std::is_same_v<TSlice, Slice<NT>>,
-//       "Slices must be of predefined type!");
+  static_assert(std::is_same_v<TSlice, Slice<NT>>,
+      "Slices must be of predefined type!");
 
-//   const uint32_t idx2 = idx - s1.total;
-//   if ((int32_t)idx2 < 0) {
-//     auto *src = (const NT * __restrict__)(s1.src + idx);
-//     NT val = LOAD(src);
-//     uint32_t row = idx / s1.elems_per_row,
-//              col = idx - row * s1.elems_per_row;
-//     auto ptr = g_dst + row*elems_per_row + col + col_ofs;
-//     STORE(val, ptr);
-//     return;
-//   }
-//   if constexpr(sizeof...(Slices) != 0) {
-//     naive_kernel_block(idx2, col_ofs + s1.elems_per_row, 
-//             elems_per_row, g_dst, rest...);
-//   }
-// }
-
-  // [3,1] + [3,4] + [3,3] = [3,7]
-  // C   AAAA   BBB   CAAAABBB
-  // C + AAAA + BBB = CAAAABBB
-  // C   AAAA   BBB   CAAAABBB
+  if constexpr(sizeof...(Slices) == 0) {
+    return Slice<NT>{ s.src, s.elems_per_row, {col} };
+  } else {
+    uint32_t col2 = col - s.elems_per_row;
+    if ((int32_t)col2 < 0) {
+       return Slice<NT>{ s.src, s.elems_per_row, {col} };
+    } 
+    return concat_seq_store_block<NT>(col2, rest...);
+  }
+}
 
 template < uint32_t BlockSz, class NT, class ...Slices >
 __launch_bounds__(BlockSz, 4)
 __global__ void concat_naive_seq_store( 
             const uint32_t elems_per_row, 
             const uint32_t total_elems, 
-            NT * __restrict__ g_dst, Slice<NT> s1, Slice<NT> s2) { 
+            NT * __restrict__ g_dst, Slices... rest) { 
   
   const uint32_t bidx = blockIdx.x, tid = threadIdx.x;
   const uint32_t idx = bidx * BlockSz + tid;
@@ -128,20 +131,11 @@ __global__ void concat_naive_seq_store(
   const uint32_t row = idx / elems_per_row,
            col = idx - row*elems_per_row;
 
-  const NT * __restrict__ src = nullptr;
-  uint32_t col2 = col - s1.elems_per_row;
-  if ((int32_t)col2 < 0) {
-    src = decltype(src)(s1.src + row*s1.elems_per_row + col);
-  } else {
-    uint32_t col3 = col2 - s2.elems_per_row;
-    if ((int32_t)col3 < 0) {
-      src = decltype(src)(s2.src + row*s2.elems_per_row + col2);
-    }
-  }
-  if (src != nullptr) {
-    NT val = LOAD(src);
-    STORE(val, g_dst + idx);
-  }
+  auto S = concat_seq_store_block<NT>(col, rest...);
+  auto *src = (const NT * __restrict__)
+                    (S.src + row*S.elems_per_row + S.col);
+  NT val = LOAD(src);
+  STORE(val, g_dst + idx);
 }
 
 
@@ -159,10 +153,10 @@ void TestFramework::run_naive_concat() {
   size_t nBlocks = (total + BlockSz - 1) / BlockSz;
   clean_output_buf();
 
-#if 0 
+#if 1
   CU_BEGIN_TIMING(5)
-    concat_naive_kernel<BlockSz><<<nBlocks, BlockSz, 0, 0>>>
-        (concat_num_cols_, dst_buf_.devPtr, 
+    concat_naive_seq_load<BlockSz><<<nBlocks, BlockSz, 0, 0>>>
+        (concat_num_cols_, total, dst_buf_.devPtr, 
         slices[0], 
         slices[1],
         slices[2]
@@ -175,7 +169,9 @@ void TestFramework::run_naive_concat() {
         (concat_num_cols_, total,
         dst_buf_.devPtr, 
         slices[0], 
-        slices[1]);
+        slices[1],
+        slices[2]
+        );
   CU_END_TIMING("Naive seq-store kernel: #total elems: %zu; "
     "#blocks: %zu; #threads: %zu", total, nBlocks, BlockSz);
 #endif
