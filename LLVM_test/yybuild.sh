@@ -5,6 +5,8 @@ export USE_BAZEL_VERSION=6.5.0
 
 NUM=$#
 BAZEL=bazel
+DUMP_DIR=ww_dump
+EXEC=bazel-bin/llvm_test
 ROCM_PATH=$(realpath /opt/rocm)
 export CC=$ROCM_PATH/lib/llvm/bin/clang
 export CXX=$ROCM_PATH/lib/llvm/bin/clang++
@@ -25,7 +27,10 @@ GDB=
 if [ "$1" = "g" ]; then
   GDB="rocgdb --args "
   shift 1
-fi 
+fi
+
+rm -rf $DUMP_DIR && mkdir -p $DUMP_DIR
+rm -rf gpucore.*
 
         # --config=release \
         # --subcommands \
@@ -36,4 +41,6 @@ $BAZEL --output_base=/data/bazel_llvm_test \
          //:llvm_test \
          2>&1 | tee build.out
 
-$GDB ./bazel-bin/llvm_test 2>&1 | tee test.out
+roc-obj -t gfx942 -d -o $DUMP_DIR $EXEC
+
+$GDB $EXEC 2>&1 | tee test.out
