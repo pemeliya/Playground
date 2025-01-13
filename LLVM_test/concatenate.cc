@@ -43,35 +43,24 @@ struct Slice {
   };
 };
 
-template < class NT >
-struct XSlice {
-  const NT *src;
-  uint32_t elems_per_row;
-  uint32_t idx_new;
-  union {
-    uint32_t total;
-    uint32_t col;   // just another name for the field
-  };
-};
-
   // [3,1] + [3,4] + [3,3] = [3,7]
   // C   AAAA   BBB   CAAAABBB
   // C + AAAA + BBB = CAAAABBB
   // C   AAAA   BBB   CAAAABBB
 
 template < class NT, class TSlice, class ...Slices >
-__device__ XSlice<NT> concat_seq_load_block(const uint32_t idx,
+__device__ Slice<NT> concat_seq_load_block(const uint32_t idx,
             const uint32_t col_ofs, TSlice s, Slices... rest) {
 
   static_assert(std::is_same_v<TSlice, Slice<NT>>,
       "Slices must be of predefined type!");
 
   if constexpr(sizeof...(Slices) == 0) {
-    return XSlice<NT>{ s.src, s.elems_per_row, idx, {col_ofs} };
+    return Slice<NT>{ s.src, s.elems_per_row, {col_ofs} };
   } else {
     const uint32_t idx2 = idx - s.total;
     if ((int32_t)idx2 < 0) {
-      return XSlice<NT>{ s.src, s.elems_per_row, idx, {col_ofs} };
+      return Slice<NT>{ s.src, s.elems_per_row, {col_ofs} };
     }
     return concat_seq_load_block<NT>(idx2, col_ofs + s.elems_per_row, rest...);
   }
@@ -84,16 +73,19 @@ __global__ void concat_naive_seq_load(
             const uint32_t total_elems, 
             NT * __restrict__ g_dst, Slices... rest) { 
   
-  const uint32_t bidx = blockIdx.x, tid = threadIdx.x;
-  const uint32_t idx = bidx * BlockSz + tid;
+  const uint32_t bidx = blockIdx.x, tid = threadIdx.x,
+                 nrows = total_elems / elems_per_row;
+  uint32_t idx = bidx * BlockSz + tid;
   if (idx >= total_elems) return;
 
   // trying sequential load, strided store..
   auto S = concat_seq_load_block<NT>(idx, 0, rest...);
-  auto *src = (const NT * __restrict__)(S.src + S.idx_new);
+
+  idx -= S.col*nrows;
+  auto *src = (const NT * __restrict__)(S.src + idx);
   NT val = LOAD(src);
-  uint32_t row = S.idx_new / S.elems_per_row,
-           col = S.idx_new - row * S.elems_per_row;
+  uint32_t row = idx / S.elems_per_row,
+           col = idx - row * S.elems_per_row;
   auto ptr = g_dst + row*elems_per_row + col + S.col;
   STORE(val, ptr);
 }
