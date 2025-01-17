@@ -14,7 +14,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_EXTENSIONS ON)
 
 file(GLOB INC *.h *.hpp ../common/*.h ../common/*.hpp)
-file(GLOB SRC *.cpp test_main.cc)
+file(GLOB SRC *.cpp test_main.cc ../common/*.cc)
 file(GLOB GPU_SRC *.cu.cc)
 
 if(NOT ${COMPILE_FOR_ROCM})
@@ -65,9 +65,11 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 add_definitions(-D_USE_MATH_DEFINES -DCOMPILE_FOR_ROCM=${COMPILE_FOR_ROCM})
 
+link_libraries(-lpthread)
+
 add_executable(${PROJECT_NAME} ${SRC} ${INC})
 
-add_library(printf_lib SHARED printf_lib.cc)
+#add_library(printf_lib SHARED printf_lib.cc)
 
 set(TARGET_BIN "$<TARGET_FILE_NAME:${PROJECT_NAME}>")
 

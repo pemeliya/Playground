@@ -52,6 +52,7 @@
 #define cudaStreamEndCapture hipStreamEndCapture
 
 #define cudaStreamCaptureModeThreadLocal hipStreamCaptureModeThreadLocal
+#define cudaStreamCaptureModeGlobal hipStreamCaptureModeGlobal
 #define cudaGraph_t hipGraph_t
 #define cudaGraphExec_t hipGraphExec_t
 #define cudaGraphCreate hipGraphCreate

@@ -7,45 +7,42 @@
 #include <iostream>
 #include <numeric>
 #include <random>
-//#include "common/common_utils.hpp"
-#include <hip/hip_runtime.h>
 
-#define VLOG(x) std::cerr << x
+#include "common/common_utils.hpp"
 
-#define CHK(x) if(auto res = (x); res != hipSuccess) { \
-  throw std::runtime_error(std::to_string(__LINE__) + " failed!"); \
+using namespace std::chrono_literals;
+
+void threadFunc1(GPUStream *stream) {
+  VLOG(0) << "Beginning stream capture: ";
+  CHK(cudaStreamBeginCapture(stream->get(), cudaStreamCaptureModeThreadLocal));
+  std::this_thread::sleep_for(1s);
+  cudaGraph_t graph;
+  VLOG(0) << "End stream capture";
+  CHK(cudaStreamEndCapture(stream->get(), &graph));
+}
+
+void threadFunc2() {
+  VLOG(0) << "Calling cudaMalloc!";
+  void *ptr = nullptr;
+  CHK(cudaMalloc(&ptr, 256));
+  VLOG(0) << "Calling cudaMemset!";
+  CHK(cudaMemset(ptr, 0, 256));
+  VLOG(0) << "Calling cudaFree ptr: " << ptr;
+  CHK(cudaFree(ptr));
 }
 
 int main() try 
 {
-  size_t bytes = 4*sizeof(float);
-  void *ptr0, *ptr1;
-  std::vector< float > vec1{41.0f,42.0f,43.0f,44.0f}, 
-        vec0(4, 0);
-
+  GPUStream s1(0);
   {
-    CHK(hipSetDevice(0));
-    CHK(hipDeviceEnablePeerAccess(1, 0));
-    CHK(hipMalloc(&ptr0, bytes));
+  std::jthread t1(threadFunc1, &s1);
+  std::this_thread::sleep_for(100ms);
+  std::jthread t2(threadFunc2);
   }
-
-  {
-    CHK(hipSetDevice(1));
-    CHK(hipDeviceEnablePeerAccess(0, 0));
-    CHK(hipMalloc(&ptr1, bytes));
-    CHK(hipMemcpy(ptr1, vec1.data(), bytes, hipMemcpyHostToDevice));
-  }
- 
-  // copy from dev1 to dev0
-  CHK(hipMemcpyPeer(ptr0, 0, ptr1, 1, bytes));
-  
-  CHK(hipSetDevice(1));  
-  CHK(hipMemcpy(vec0.data(), ptr0, bytes, hipMemcpyDeviceToHost));
-
-  for(auto v : vec0) {
-    VLOG(0) << "v = " << v << '\n';
-  }
+  VLOG(0) << "Graceful exit!";
+  return 0;
 }
 catch(std::exception& ex) {
   VLOG(0) << "Exception: " << ex.what();
+  return 1;
 }
