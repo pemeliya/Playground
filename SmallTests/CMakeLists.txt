@@ -7,7 +7,7 @@ cmake_minimum_required(VERSION 3.12)
 
 project(simple_gpu_tests)
 
-set(COMPILE_FOR_ROCM 1)
+option(COMPILE_FOR_ROCM "whether to build for ROCM or CUDA" true)
 
 set(CMAKE_VERBOSE_MAKEFILE ON)
 set(CMAKE_CXX_STANDARD 20)

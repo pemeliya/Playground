@@ -8,6 +8,7 @@
 #include <vector>
 #include <stdexcept>
 #include <random>
+#include <sstream>
 
 #if COMPILE_FOR_ROCM
 #include<hip/hip_runtime.h>
@@ -155,7 +156,7 @@ void initRandomFloat(T *ptr, double dmin, double dmax, size_t n, size_t seed) {
 __device__ FORCEINLINE uint32_t gpuLaneId() {
   uint32_t lane_id;
 #if !COMPILE_FOR_ROCM
-#if __clang__
+#if 0 // __clang__
   return __nvvm_read_ptx_sreg_laneid();
 #else   // __clang__
   asm("mov.u32 %0, %%laneid;" : "=r"(lane_id));

@@ -2,11 +2,10 @@
 // hipcc -I.. -DCOMPILE_FOR_ROCM=1 -std=c++17 --offload-arch=gfx90a test_main.cc
 
 #include <algorithm>
-#include <stdexcept>
 #include <iomanip>
 #include <iostream>
 #include <numeric>
-#include <random>
+#include <thread>
 
 #include "common/common_utils.hpp"
 
@@ -33,6 +32,7 @@ void threadFunc2() {
 
 int main() try 
 {
+  DeviceInit();
   GPUStream s1(0);
   {
   std::jthread t1(threadFunc1, &s1);
