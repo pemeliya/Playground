@@ -162,7 +162,7 @@ __device__ FORCEINLINE uint32_t gpuLaneId() {
   asm("mov.u32 %0, %%laneid;" : "=r"(lane_id));
 #endif  // __clang__
 #else
-  lane_id = __lane_id();
+  lane_id = -1;//__lane_id();
 #endif
   return lane_id;
 }

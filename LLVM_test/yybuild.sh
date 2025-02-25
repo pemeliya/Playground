@@ -43,4 +43,6 @@ $BAZEL --output_base=/data/bazel_llvm_test \
 
 roc-obj -t gfx942 -d -o $DUMP_DIR $EXEC
 
+rm -rf gpucore.*
+#AMD_SERIALIZE_COPY=3 
 $GDB $EXEC 2>&1 | tee test.out

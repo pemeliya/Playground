@@ -2,13 +2,33 @@
 #ifndef HIPBLASLT_GEMM_HPP
 #define HIPBLASLT_GEMM_HPP 1
 
+#define __HIP_DISABLE_CPP_FUNCTIONS__
+#define LEGACY_HIPBLAS_DIRECT
+
+#define __HIP__
+
+// #if defined(__clang__) && defined(__HIP__)
+// #error ops3
+// #endif
+
+// #ifdef __HIPCC_RTC__
+// #error ops1
+// #else
+// #error ops2
+// #endif
+
+// #include <hip/hip_fp8.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_complex.h>
 #include <iostream>
 #include <optional>
 
 #include "common/common.h"
+
+#include <hipblas/hipblas.h> // hipblasStatusToString
 #include <hipblaslt/hipblaslt.h>
+
+
 
 #if HIPBLASLT_VERSION_MINOR < 6
 #define hipDataType hipblasDatatype_t
@@ -74,6 +94,11 @@ inline std::ostream& operator<<(std::ostream& os, hipDoubleComplex Z) {
 
 template < class T >
 constexpr hipDataType HipBlasltType(const T *) {
+
+  // if constexpr (std::is_same_v<T, __hip_fp8_e5m2_fnuz>) 
+  //   return HIP_R_8F_E5M2_FNUZ;
+  // if constexpr (std::is_same_v<T, __hip_fp8_e4m3_fnuz>) 
+  //   return HIP_R_8F_E4M3_FNUZ;
   if constexpr (std::is_same_v<T, __half>) 
     return HIP_R_16F;
   if constexpr (std::is_same_v<T, hip_bfloat16>) 
@@ -94,19 +119,40 @@ constexpr hipDataType HipBlasltType(const T *) {
   return (hipDataType)-1;
 }
 
-struct HipMatrixLayout {
+template < class T >
+constexpr const char *HipBlasltStr(const T *) {
+  if constexpr (std::is_same_v<T, __half>) 
+    return "f16";
+  if constexpr (std::is_same_v<T, hip_bfloat16>) 
+    return "bf16";
+  if constexpr (std::is_same_v<T, float>) 
+    return "f32r";
+  if constexpr (std::is_same_v<T, double>) 
+    return "f64r";
+  if constexpr (std::is_same_v<T, int32_t>) 
+    return "i32";
+  if constexpr (std::is_same_v<T, int8_t>) 
+    return "i8";
+  if constexpr (std::is_same_v<T, hipFloatComplex>) 
+    return "f32c";
+  if constexpr (std::is_same_v<T, hipDoubleComplex>) 
+    return "f64c";
+  
+  return "??";
+}
 
-    enum class Order { kRowMajor, kColumnMajor };
+
+struct HipMatrixLayout {
 
     MOVABLE_HANDLE(HipMatrixLayout);
 
     HipMatrixLayout(hipDataType type, size_t num_rows, size_t num_cols, 
-          Order order, size_t batch_size = 1,
+          hipblasLtOrder_t order, size_t batch_size = 1,
           std::optional<int64_t> leading_dim_stride = std::nullopt,
           std::optional<int64_t> batch_stride = std::nullopt) 
     {
       if (!leading_dim_stride) {
-        leading_dim_stride = (order == Order::kRowMajor) ? num_cols : num_rows;
+        leading_dim_stride = (order == HIPBLASLT_ORDER_ROW) ? num_cols : num_rows;
       }
       CHK_HIPBLASLT(hipblasLtMatrixLayoutCreate(
         &handle, type, num_rows, num_cols, *leading_dim_stride));
@@ -118,14 +164,16 @@ struct HipMatrixLayout {
       if (!batch_stride) {
         batch_stride = (batch_size > 1) ? num_rows * num_cols : 0;
       }
-      VLOG("MatrixLayout type: " << (int)type
-          << " rows: " << num_rows << " cols: " << num_cols
-          << " batch_size: " << batch_size
-          << " leading_dim_stride: " << *leading_dim_stride
-          << " batch_stride: " << *batch_stride);
+      // VLOG(0) << "MatrixLayout type: " << (int)type
+      //     << " rows: " << num_rows << " cols: " << num_cols
+      //     << " batch_size: " << batch_size
+      //     << " leading_dim_stride: " << *leading_dim_stride
+      //     << " batch_stride: " << *batch_stride;
 
       SetAttr(handle, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, 
             *batch_stride);
+
+      SetAttr(handle, HIPBLASLT_MATRIX_LAYOUT_ORDER, order);
     }
     ~HipMatrixLayout() {
       if(handle != hipblasLtMatrixLayout_t{}) {
@@ -143,10 +191,10 @@ struct HipMatmulDesc {
         hipblasOperation_t trans_a, hipblasOperation_t trans_b,
         hipblasLtEpilogue_t epilogue) {
 
-    VLOG("BlasLt::MatmulDesc compute_type: " << int(compute_type)
-          << " scale_type: " << int(scale_type)
-          << " epilogue: " << (int)epilogue << " trans_a: " << (int)trans_a
-          << " trans_b: " << (int)trans_b);
+    // VLOG(0) << "BlasLt::MatmulDesc compute_type: " << int(compute_type)
+    //       << " scale_type: " << int(scale_type)
+    //       << " epilogue: " << (int)epilogue << " trans_a: " << (int)trans_a
+    //       << " trans_b: " << (int)trans_b;
 
       CHK_HIPBLASLT(hipblasLtMatmulDescCreate(
         &handle, compute_type, scale_type));
@@ -186,9 +234,13 @@ struct BlasLtGemm {
     hipblasOperation_t trans_a;
     hipblasOperation_t trans_b;
     hipblasComputeType_t compute_type;
+    hipblasLtOrder_t   orderA;
+    hipblasLtOrder_t   orderB;
+    hipblasLtOrder_t   orderCD;
     int64_t            m;
     int64_t            n;
     int64_t            k;
+    int64_t batch_size;
     hipblasLtEpilogue_t epilogue;
     uint64_t            max_algorithms;
     uint64_t            max_workspace_size;
@@ -198,7 +250,8 @@ struct BlasLtGemm {
   auto handle() { return blas_lt_; }
 
   bool hasBias(hipblasLtEpilogue_t epi) {
-    return (epi == HIPBLASLT_EPILOGUE_BIAS || epi == HIPBLASLT_EPILOGUE_RELU_BIAS ||
+    return (epi == HIPBLASLT_EPILOGUE_BIAS || 
+            epi == HIPBLASLT_EPILOGUE_RELU_BIAS ||
             epi == HIPBLASLT_EPILOGUE_GELU_BIAS ||
             epi == HIPBLASLT_EPILOGUE_GELU_AUX_BIAS);
   }
@@ -207,15 +260,13 @@ struct BlasLtGemm {
   MatmulPlan createPlan(const TypeA *dA, const TypeB *dB, const TypeC *dC, const TypeD *dBias,
       TypeD *dD, Scalar alpha, Scalar beta, const Config& cfg) {
 
-    auto order = HipMatrixLayout::Order::kColumnMajor;
-
     MatmulPlan plan = {
       .desc = HipMatmulDesc(cfg.compute_type, HipBlasltType(&alpha),
             cfg.trans_a, cfg.trans_b, cfg.epilogue),
-      .matA = HipMatrixLayout(HipBlasltType(dA), cfg.m, cfg.k, order),
-      .matB = HipMatrixLayout(HipBlasltType(dB), cfg.k, cfg.n, order),
-      .matC = HipMatrixLayout(HipBlasltType(dC), cfg.m, cfg.n, order),
-      .matD = HipMatrixLayout(HipBlasltType(dD), cfg.m, cfg.n, order),
+      .matA = HipMatrixLayout(HipBlasltType(dA), cfg.m, cfg.k, cfg.orderA, cfg.batch_size),
+      .matB = HipMatrixLayout(HipBlasltType(dB), cfg.k, cfg.n, cfg.orderB, cfg.batch_size),
+      .matC = HipMatrixLayout(HipBlasltType(dC), cfg.m, cfg.n, cfg.orderCD, cfg.batch_size),
+      .matD = HipMatrixLayout(HipBlasltType(dD), cfg.m, cfg.n, cfg.orderCD, cfg.batch_size),
     };
 
     return std::move(plan);

@@ -148,10 +148,10 @@ private:
 #define CPU_BEGIN_TIMING(ID) \
         auto z1_##ID = std::chrono::high_resolution_clock::now()
 
-#define CPU_END_TIMING(ID, fmt, ...)                                                    \
+#define CPU_END_TIMING(ID, num_runs, fmt, ...)                                                    \
         auto z2_##ID = std::chrono::high_resolution_clock::now();              \
         std::chrono::duration<double, std::milli> ms_##ID = z2_##ID - z1_##ID; \
-        fprintf(stderr, "%s: " fmt " elapsed: %f msec\n", #ID, ##__VA_ARGS__, ms_##ID.count())
+        fprintf(stderr, "%s: " fmt " elapsed: %f msec\n", #ID, ##__VA_ARGS__, ms_##ID.count() / num_runs)
 
 #define CU_BEGIN_TIMING(N_ITERS) { \
     (void)cudaDeviceSynchronize();       \

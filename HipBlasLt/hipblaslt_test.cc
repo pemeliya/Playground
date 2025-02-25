@@ -4,8 +4,6 @@
 // hipcc -lhipblaslt -std=c++17 --offload-arch=gfx90a hipblaslt_test.cc -Wno-backslash-newline-escape
 // HIPBLASLT_LOG_MASK=5 HIPBLASLT_LOG_LEVEL=5 ./a.out
 
-#include <hip/hip_fp16.h>
-#include <hip/hip_complex.h>
 #include <iostream>
 #include <random>
 #include <optional>
@@ -46,21 +44,54 @@ void matMatMultMixPrecEnumerate(T alpha, T beta, int m, int n, int k,
   bit = bitfield & 8;
   int Ds1 = bit ? n : 1, Ds2 = bit ? 1 : m;
 
-  VLOG(std::hex << "bits: 0x" << bitfield << std::dec <<
+  VLOG(0) << std::hex << "bits: 0x" << bitfield << std::dec <<
         " m = " << m << " n = " << n << " k = " << k <<
         "\nAs: " << As1 << "," << As2 << 
         "\nBs: " << Bs1 << "," << Bs2 << 
         "\nCs: " << Cs1 << "," << Cs2 << 
-        "\nDs: " << Ds1 << "," << Ds2);
+        "\nDs: " << Ds1 << "," << Ds2;
 
   matMatMultMixPrec(alpha, beta, m, n, k,
     A, As1, As2, B, Bs1, Bs2,
     C, Cs1, Cs2, D, Ds1, Ds2, bias);
 }
 
+template < class TypeA, class TypeB, class TypeC, class TypeD, class Scalar >
+void benchmark(const TypeA *dA, const TypeB *dB, 
+      const TypeC *dC, const TypeD *dBias,
+      TypeD *dD, Scalar alpha, Scalar beta, const BlasLtGemm::Config& cfg) {
+  
+  BlasLtGemm gemm;
+  auto plan = gemm.createPlan(dA, dB, dC, dBias, dD, alpha, beta, cfg);
+  auto algos = gemm.getAlgorithms(plan, cfg, dBias);
+  if (algos.empty()) throw std::runtime_error("No algorithms found!!");
+
+  auto t2s = [](auto t){ return t == HIPBLAS_OP_N ? "N" : "T"; };
+  auto o2s = [](auto o){ return o == HIPBLASLT_ORDER_ROW ? "R" : "C"; };
+
+  size_t n_warmups = 2, n_runs = 10;
+  for (size_t i = 0; i < n_warmups; i++) {
+    gemm.run(dA, dB, dC, dBias, dD, alpha, beta, cfg, plan, algos[0]);
+  }
+  cudaStreamSynchronize(cfg.stream);
+
+  CPU_BEGIN_TIMING(GEMM);
+  for (size_t i = 0; i < n_runs; i++) {
+    gemm.run(dA, dB, dC, dBias, dD, alpha, beta, cfg, plan, algos[0]);
+  }
+  cudaStreamSynchronize(cfg.stream);
+  CPU_END_TIMING(GEMM, n_runs, "%ld x %ld x %ld batch %ld (%s,%s -> %s) trans: %s/%s order: %s/%s/%s",
+        cfg.m, cfg.n, cfg.k, cfg.batch_size,
+        HipBlasltStr(dA), HipBlasltStr(dB), HipBlasltStr(dD),
+        t2s(cfg.trans_a), t2s(cfg.trans_b),
+        o2s(cfg.orderA), o2s(cfg.orderB), o2s(cfg.orderCD));
+}
+
 int main(int argc, char *argv[]) try
 {
-	int m = 40, n = 20, k = 30;
+	int m = 1024, n = 500, k = 1024, batch_size = 200,
+      mk = std::max(m, k), mn = std::max(m, n),
+      nk = std::max(n, k);
   float alpha{1.0}, beta{0.0};
 
 #if 0
@@ -76,14 +107,13 @@ int main(int argc, char *argv[]) try
 #endif
 
   size_t extra = 0, extra2 = 16*1024*1024;
-  HVector< TypeA > a(m * k + extra);
-  HVector< TypeB > b(n * k + extra);
-  HVector< TypeC > c(4 + extra);
-  HVector< TypeD > d1(m * n + extra2),
-                   d2(m * n + extra2); 
+  HVector< TypeA > a(mk*mk * batch_size + extra);
+  HVector< TypeB > b(nk*nk * batch_size + extra);
+  HVector< TypeC > c(mn*mn * batch_size + extra);
+  //HVector< TypeD > d(m * n * batch_size + extra); 
   HVector< TypeD > bias(m + extra);
 
-#if 0
+#if 1
   initRange(a.data(), 0.0, 0.02, m*k);
   initRange(b.data(), 10.0, -0.01, n*k);
   initRange(c.data(), 0.0, -0.005, m*n);
@@ -102,19 +132,33 @@ int main(int argc, char *argv[]) try
   bias.copyHToD();
 
   BlasLtGemm gemm;
-  BlasLtGemm::Config cfg{
-    .trans_a = HIPBLAS_OP_N,
-    .trans_b = HIPBLAS_OP_N,
-    .compute_type = HIPBLAS_COMPUTE_32F,
-    .m = m,
-    .n = n,
-    .k = k,
-    .epilogue = HIPBLASLT_EPILOGUE_BIAS,
-    .max_algorithms = 16,
-    .max_workspace_size = 1ull << 20,
-    .stream = 0,
-  };
+  BlasLtGemm::Config cfg;
 
+  for(int order_ab = 0; order_ab < 8; order_ab++) {
+  for(int trans_ab = 0; trans_ab < 4; trans_ab++) {
+
+    cfg = BlasLtGemm::Config{
+      .trans_a = trans_ab & 1 ? HIPBLAS_OP_T : HIPBLAS_OP_N,
+      .trans_b = trans_ab & 2 ? HIPBLAS_OP_T : HIPBLAS_OP_N,
+      .compute_type = HIPBLAS_COMPUTE_32F,
+      .orderA = order_ab & 1 ? HIPBLASLT_ORDER_ROW : HIPBLASLT_ORDER_COL,
+      .orderB = order_ab & 2 ? HIPBLASLT_ORDER_ROW : HIPBLASLT_ORDER_COL,
+      .orderCD = order_ab & 4 ? HIPBLASLT_ORDER_ROW : HIPBLASLT_ORDER_COL,
+      .m = m,
+      .n = n,
+      .k = k,
+      .batch_size = batch_size,
+      .epilogue = HIPBLASLT_EPILOGUE_DEFAULT,
+      .max_algorithms = 16,
+      .max_workspace_size = 1ull << 20,
+      .stream = 0,
+    };
+    benchmark(a.devPtr, b.devPtr, c.devPtr, bias.devPtr,
+      c.devPtr, alpha, beta, cfg);
+  }
+  }
+  return 0;
+#if 0
   VLOG(0) << "Running algorithm default";
   auto plan = gemm.createPlan(a.devPtr, b.devPtr, c.devPtr, bias.devPtr,
       d1.devPtr, alpha, beta, cfg);
@@ -173,8 +217,9 @@ int main(int argc, char *argv[]) try
       VLOG(0) << i << ": algorithm " << index << " OK";
     }
   }
-  VLOG("Accuracy check failed for " << totalFailed << " out of " 
-      << algos.size() << " algorithms!");
+  VLOG(0) << "Accuracy check failed for " << totalFailed << " out of " 
+      << algos.size() << " algorithms!";
+#endif
   return 0;
 }
 catch(std::exception& ex) {
