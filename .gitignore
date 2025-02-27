@@ -1,1 +1,31 @@
-*/build/
+    # Object files
+    *.o
+    *.obj
+    
+    # Executables
+    *.exe
+    *.out
+    
+    # Libraries
+    *.lib
+    *.a
+    
+    # Temporary files and folders
+    tmp/
+    temp/
+    
+    # Build output directories
+    build/
+    bin/
+    debug/
+    release/
+    
+    # IDE specific files
+    .vscode/
+    .idea/
+    *.sln
+    *.vcxproj
+    *.vcxproj.filters
+    
+    # System files
+    .DS_Store
