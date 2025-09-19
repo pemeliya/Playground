@@ -51,6 +51,7 @@
 #define cudaStreamBeginCapture hipStreamBeginCapture
 #define cudaStreamBeginCaptureToGraph hipStreamBeginCaptureToGraph
 #define cudaStreamEndCapture hipStreamEndCapture
+#define cudaStreamDefault hipStreamDefault
 
 #define cudaStreamCaptureModeThreadLocal hipStreamCaptureModeThreadLocal
 #define cudaStreamCaptureModeGlobal hipStreamCaptureModeGlobal
@@ -69,7 +70,10 @@
 #define cudaDeviceSynchronize hipDeviceSynchronize
 #define cudaEventElapsedTime hipEventElapsedTime
 #define cudaLaunchKernel hipLaunchKernel
-#define cudaStreamDefault hipStreamDefault
+#define cudaOccupancyAvailableDynamicSMemPerBlock hipOccupancyAvailableDynamicSMemPerBlock
+#define cudaOccupancyMaxActiveBlocksPerMultiprocessor hipOccupancyMaxActiveBlocksPerMultiprocessor
+#define cudaOccupancyMaxPotentialBlockSize hipOccupancyMaxPotentialBlockSize
+
 #define FORCEINLINE inline
 // #include <hipcub/util_type.hpp>
 // #include <hipcub/util_allocator.hpp>
@@ -162,7 +166,7 @@ __device__ FORCEINLINE uint32_t gpuLaneId() {
   asm("mov.u32 %0, %%laneid;" : "=r"(lane_id));
 #endif  // __clang__
 #else
-  lane_id = -1;//__lane_id();
+  lane_id = __lane_id();
 #endif
   return lane_id;
 }

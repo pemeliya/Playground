@@ -18,8 +18,8 @@ size_t NumThreadsNew(size_t n, size_t k, size_t batch_size)
   size_t max_threads = (k > 8 ? 512 : 1024);
   n_threads_warp = std::min(n_threads_warp, max_threads);
   
-  VLOG("n: " << n << "; k: " << k << " n_threads: " << n_threads 
-      << "; n_threads_warp: " << n_threads_warp);
+  VLOG(0) << "n: " << n << "; k: " << k << " n_threads: " << n_threads 
+      << "; n_threads_warp: " << n_threads_warp;
   return 0;
 }
 
@@ -46,9 +46,9 @@ struct TopkArgs {
 };
 
 void calcOccupancy(const void *kernel) {
-  size_t dynSHMem = 0;
-  CHK(cudaOccupancyAvailableDynamicSMemPerBlock(&dynSHMem, kernel, 4, 512)); 
-  VLOG(0) << "Shared mem available: " << (double)dynSHMem/1024.0 << "KB" ;
+  // size_t dynSHMem = 0;
+  // CHK(cudaOccupancyAvailableDynamicSMemPerBlock(&dynSHMem, kernel, 4, 512)); 
+  // VLOG(0) << "Shared mem available: " << (double)dynSHMem/1024.0 << "KB" ;
 
   int numBlocks = 0;
   CHK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&numBlocks, 
@@ -76,18 +76,18 @@ void TypedTopK(TopkArgs<T> args)
   constexpr size_t max_kv_size = sizeof(uint64_t);
   // Allocate shmem assuming we have a full reduction.
 #if USE_TOPK_DEFAULT  
-  uint32_t shmem_size = std::bit_ceil(args.k) * max_kv_size * WAVEFRONT_SIZE;
+  uint32_t shmem_size = std::bit_ceil(args.k) * max_kv_size * WARP_SIZE;
 #else
   //num_threads = args.num_elements / std::bit_ceil(args.k);
   num_threads = 64;
-  num_threads = (num_threads + WAVEFRONT_SIZE - 1) & ~(WAVEFRONT_SIZE - 1);
+  num_threads = (num_threads + WARP_SIZE - 1) & ~(WARP_SIZE - 1);
   // 16Kb per block => 4096 words of mem; 512 threads => 16 elements per thread
   uint32_t shmem_size = num_threads * sizeof(uint32_t) / 2;
 #endif
-  VLOG("Testing N = " << args.num_elements << "; K = " << args.k <<
+  VLOG(0) << "Testing N = " << args.num_elements << "; K = " << args.k <<
           "; batch_size: " << args.batch_size << 
           "; n_blocks: " << blocks_per_grid << "; shmem_size: " << shmem_size
-        << " num_threads: " << num_threads);
+        << " num_threads: " << num_threads;
 
   void* kernel_args[] = {&args.data, &args.num_elements, &args.top_elements,
                          &args.top_indices, &args.k};
@@ -119,12 +119,17 @@ void benchmark_topk(size_t batch_size, size_t N, size_t K, bool verify = true)
     //values[i] = i+1;
   }
   values.copyHToD();
-  TypedTopK< NT >({values.devPtr, N, top_elems.devPtr, 
-         (uint32_t *)indices.devPtr, K, batch_size});
+  TypedTopK< NT >(
+    TopkArgs {
+      .data = values.devPtr,
+      .num_elements = N,
+      .top_elements = top_elems.devPtr,
+      .top_indices = (uint32_t *)indices.devPtr,
+      .k = K,
+      .batch_size = batch_size
+    });
 
-  if(!verify) {
-    return;
-  }
+  if(!verify) return;
 
   top_elems.copyDToH();
   indices.copyDToH();
@@ -157,13 +162,11 @@ void benchmark_topk(size_t batch_size, size_t N, size_t K, bool verify = true)
     //VLOG("------------------------------------------------------")
     checkme(gpu_vptr, truth_vals.data(), K, K, 1, (NT)1e-5, print_if_differs);
   }
-    
 }
 
 int main() try 
 {
   DeviceInit();
-
   benchmark_topk< uint32_t >(1, 1024*2, 16, false);
   return 0;
 

@@ -20,13 +20,9 @@ limitations under the License.
 #include <stdint.h>
 
 #if COMPILE_FOR_ROCM  // warp size is 64 for ROCM
-#ifndef __AMDGCN_WAVEFRONT_SIZE
-#error Wavefront size is not defined! Please use HIPCC compiler!
-#else
-#define WAVEFRONT_SIZE __AMDGCN_WAVEFRONT_SIZE
-#endif
+#define WARP_SIZE 64
 #else // NVIDIA
-#define WAVEFRONT_SIZE 32 
+#define WARP_SIZE 32 
 #endif
 
 #define USE_TOPK_DEFAULT 0

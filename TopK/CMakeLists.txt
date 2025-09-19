@@ -7,14 +7,14 @@ cmake_minimum_required(VERSION 3.12)
 
 project(topk)
 
-set(COMPILE_FOR_ROCM 0)
+set(COMPILE_FOR_ROCM 1)
 
 set(CMAKE_VERBOSE_MAKEFILE ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_EXTENSIONS ON)
 
 file(GLOB INC *.h *.hpp ../common/*.h ../common/*.hpp)
-file(GLOB SRC *.cpp *.cc)
+file(GLOB SRC *.cpp *.cc ../common/*.cc)
 file(GLOB GPU_SRC *.cu.cc)
 
 if(NOT ${COMPILE_FOR_ROCM})
