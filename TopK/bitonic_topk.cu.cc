@@ -305,7 +305,7 @@ __global__ void RunTopK_bitonic_shuffle(const KT * __restrict__ data, uint32_t n
   const uint32_t tid = threadIdx.x, lane = tid % WARP_SIZE;
   uint32_t idx = tid;
 
-  constexpr uint32_t I = 1;
+    constexpr uint32_t I = 1;
   KVT A[I] = {idx < n ? in[idx] : minVal, idx};
   //LOUTZ("original: %d", A);
   topk.local_sort(A, I);
@@ -313,6 +313,7 @@ __global__ void RunTopK_bitonic_shuffle(const KT * __restrict__ data, uint32_t n
   uint32_t i = 0;
   for(idx += blockSz; ; idx += blockSz, i++) {
     auto warpId = idx & ~(WARP_SIZE - 1);
+    
     //OUTZ("idx: %d, warpID: %d", idx, warpId);
     if(warpId >= n) { // retire completely unused warps
        break;
@@ -563,9 +564,7 @@ __global__ void RunTopK_test(KT* data, uint32_t n, KT* result, uint32_t* result_
 template < class T >
 void TypedTopK(TopkArgs& args) 
 {
-  uint32_t num_threads = 1024;
-
-#define XKERNEL(K) if(args.k < K) { \
+#define XKERNEL(K) if(args.k <= K) { \
       return reinterpret_cast< void *>(RunTopK_bitonic_shuffle<K, T>); }
   auto get_kernel = [&args]() -> void * {
     //XKERNEL(1) XKERNEL(2) XKERNEL(4) XKERNEL(8) 
@@ -573,13 +572,17 @@ void TypedTopK(TopkArgs& args)
     return nullptr;
   };
 
-  uint32_t blocks_per_grid = args.batch_size;
-  constexpr size_t max_kv_size = sizeof(uint64_t);
-  uint32_t shmem_size = std::bit_ceil(args.k) * max_kv_size * WARP_SIZE;
+  uint32_t n_blocks = args.batch_size;
+  
+  //num_threads = args.num_elements / std::bit_ceil(args.k);
+  uint32_t num_threads = 64;
+  num_threads = (num_threads + WARP_SIZE - 1) & ~(WARP_SIZE - 1);
+  // 16Kb per block => 4096 words of mem; 512 threads => 16 elements per thread
+  uint32_t shmem_size = num_threads * sizeof(uint32_t) / 2;
 
   VLOG(0) << "Testing N = " << args.num_elems << "; K = " << args.k <<
           "; batch_size: " << args.batch_size << 
-          "; n_blocks: " << blocks_per_grid << "; shmem_size: " << shmem_size
+          "; n_blocks: " << n_blocks << "; shmem_size: " << shmem_size
         << " num_threads: " << num_threads;
 
   auto kernel = get_kernel();
@@ -587,7 +590,7 @@ void TypedTopK(TopkArgs& args)
                          &args.top_indices, &args.k};
 
   CU_BEGIN_TIMING(0)
-  (void)cudaLaunchKernel(kernel, blocks_per_grid, num_threads, kernel_args,
+  (void)cudaLaunchKernel(kernel, n_blocks, num_threads, kernel_args,
                         shmem_size, 0);
   CU_END_TIMING("TopK N = %zu; K = %zu; batch_size: %zu", 
       args.num_elems, args.k, args.batch_size);
