@@ -20,7 +20,10 @@ void benchmark_topk(TopKType type,
   int seed = 1112;//rd();   // ensure determinism
   mersenne::init_genrand(seed);
   for(size_t i = 0; i < in_total; i++) {
-    RandomBits(values[i]);     //values[i] = i+1;
+    RandomBits(values[i]);
+    // size_t m1 = i+1;
+    // values[i] = (m1*m1*m1 - 7777)%513;
+    // VLOG(0) << i << " val = " << values[i];
   }
   values.copyHToD();
   TopkArgs args =  {
@@ -49,7 +52,8 @@ void benchmark_topk(TopKType type,
     
     std::iota(idxs.begin(), idxs.end(), 0);
     std::sort(idxs.begin(), idxs.end(), [vptr](const auto& a, const auto& b) {
-      return vptr[a] > vptr[b];
+      // NOTE: that's the condition used by topk kernel
+      return vptr[a] == vptr[b] ? a > b : vptr[a] > vptr[b];
     });
     // save truth values before sorting idxs to keep it consistent with gpu_vptr
     for(size_t j = 0; j < K; j++) {

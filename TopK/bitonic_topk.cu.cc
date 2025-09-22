@@ -43,6 +43,7 @@ struct BitonicTopK {
   struct KVT {
     NT key;
     uint32_t idx;
+    // NOTE NOTE: I am not sure if we need this complicated condition!!
     __device__ FORCEINLINE bool operator <(const KVT& rhs) {
       return key == rhs.key ? idx < rhs.idx : key < rhs.key;
     }
@@ -244,7 +245,8 @@ int __shfl_xor(int var, int lane_mask, int width = WARP_SIZE) {
         const uint32_t blockSz, KVT (&A)[1], KVT *sh) 
   {
     const auto warpId = tid / WARP_SIZE;
-#if 0 
+#if 0
+    const auto lane = gpuLaneId();
     sh[tid] = A[0];
     __syncthreads();
     if(warpId == 0) {
@@ -333,6 +335,8 @@ __global__ void RunTopK_bitonic_shuffle(const NT * __restrict__ data, uint32_t n
     // __syncthreads();
   } // for idx
 
+  LOUTZ("final A: %u, %d", A[0].key, A[0].idx);
+
   topk.merge_warps(tid, blockSz, A, (KVT *)g_shared_mem);
   if(tid < WARP_SIZE) {
     // NOTE: do we need that final rebuild ??
@@ -347,7 +351,8 @@ __global__ void RunTopK_bitonic_shuffle(const NT * __restrict__ data, uint32_t n
       vals_out[0] = A[0].key;
       idxs_out[0] = A[0].idx;
     }
-    LOUTZ("key: %u idx: %u", A[0].key, A[0].idx);
+    if(tid < k)
+    LOUTZ("output key: %u idx: %u", A[0].key, A[0].idx);
   } // if(warpId)  
 } // RunTopK_bitonic_shuffle
 
@@ -571,10 +576,10 @@ void TypedTopK(TopkArgs& args)
   uint32_t n_blocks = args.batch_size;
   
   //num_threads = args.num_elements / std::bit_ceil(args.k);
-  uint32_t num_threads = 64;
+  uint32_t num_threads = WARP_SIZE*4;
   num_threads = (num_threads + WARP_SIZE - 1) & ~(WARP_SIZE - 1);
   // 16Kb per block => 4096 words of mem; 512 threads => 16 elements per thread
-  uint32_t shmem_size = num_threads * sizeof(uint32_t) / 2;
+  uint32_t shmem_size = num_threads * sizeof(uint64_t); //num_threads * sizeof(uint32_t) / 2;
 
   VLOG(0) << "Testing N = " << args.num_elems << "; K = " << args.k <<
           "; batch_size: " << args.batch_size << 
