@@ -112,7 +112,7 @@ void benchmark_topk(size_t batch_size, size_t N, size_t K, bool verify = true)
   HVector< int32_t > indices(out_total);
 
   std::random_device rd;
-  int seed = rd();  
+  int seed = 1112;//rd();   // ensure determinism
   mersenne::init_genrand(seed);
   for(size_t i = 0; i < in_total; i++) {
     RandomBits(values[i]);
@@ -167,7 +167,7 @@ void benchmark_topk(size_t batch_size, size_t N, size_t K, bool verify = true)
 int main() try 
 {
   DeviceInit();
-  benchmark_topk< uint32_t >(1, 1024*2, 16, false);
+  benchmark_topk< uint32_t >(1, 1024*2, 16, true);
   return 0;
 
   //size_t batch_size, size_t N, size_t K

@@ -80,8 +80,12 @@ __device__ FORCEINLINE  NT gpuShuffle(NT val, uint32_t idx,
             res.d[i] = __shfl_up(in.d[i], idx);
         else if constexpr(Type == ShflType::Down)
             res.d[i] = __shfl_down(in.d[i], idx);
-        else if constexpr(Type == ShflType::Xor)
+        else if constexpr(Type == ShflType::Xor) {
+            // int self = __lane_id();
+            // int index = self^idx;
+            // res.d[i] = __builtin_amdgcn_ds_bpermute(index<<2, in.d[i]);
             res.d[i] = __shfl_xor(in.d[i], idx);
+        }
 #endif
     }
     return res.v;

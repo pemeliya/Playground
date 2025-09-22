@@ -221,6 +221,15 @@ struct BitonicTopK {
 #pragma unroll
       for(int32_t j = i - 1; j >= 0; j--) {
         int32_t bit = biti ^ gpuGetBit(lane, j);
+
+/*
+int __shfl_xor(int var, int lane_mask, int width = WARP_SIZE) {
+    int self = __lane_id();
+    int index = self^lane_mask;
+    index = index >= ((self+width)&~(width-1))?self:index;
+    return __builtin_amdgcn_ds_bpermute(index<<2, var);
+}*/
+        
 #pragma unroll
         for(uint32_t v = 0; v < I; v++) {
           auto xA = gpuShuffle< ShflType::Xor >(A[v], 1u << j); 
@@ -389,7 +398,7 @@ struct BitonicTopK {
   // inter-warps merge of sorted values in A: results are returned by the 1st warp
   // shared memory requirements: sizeof(NT)*BlockSize / 2
   // values of A must be alternating sorted k-sequences
-  template < uint32_t SZ, class NT >
+  template < class NT >
   __device__ FORCEINLINE void merge_warps(const uint32_t tid, 
         const uint32_t blockSz, NT (&A)[1], NT *sh) 
   {
@@ -470,7 +479,7 @@ __global__ void RunTopK_bitonic_shuffle(const KT * __restrict__ data, uint32_t n
     // if(tid == 1023)
     // LOUTZ("loaded B: %d = %d", idx, B.key);
     topk.local_sort(B);
-    topk.merge(A, B);
+    topk.merge(A[0], B[0]);
     //OUTZ("%d: idx: %d: xA = %d, A = %d; xB = %d, B = %d", tid, idx, xA, A, xB, B);
     topk.rebuild(A);
     
@@ -484,18 +493,19 @@ __global__ void RunTopK_bitonic_shuffle(const KT * __restrict__ data, uint32_t n
 
   topk.merge_warps(tid, blockSz, A, (KVT *)g_shared_mem);
   if(tid < WARP_SIZE) {
-
-    topk.final_reduce(A, KVT{minVal, 0});
+    // NOTE: do we need that final rebuild ??
+    topk.template final_reduce< true >(A, KVT{minVal, 0});
  
-    //LOUTZ("final: %d", A.key);
+    //LOUTZ("final: %d", A[0].key);
     auto vals_out = result + k * bidx + tid;
     auto idxs_out = result_idxs + k * bidx + tid;
 
     uint32_t diff = tid - (K - k);
     if(diff < k) { // use unsigned compare ! 
-      vals_out[0] = A.key;
-      idxs_out[0] = A.idx;
+      vals_out[0] = A[0].key;
+      idxs_out[0] = A[0].idx;
     }
+    LOUTZ("key: %u idx: %u", A[0].key, A[0].idx);
   } // if(warpId)  
 } // RunTopK_bitonic_shuffle
 
@@ -516,6 +526,16 @@ __device__ KT loadData(uint32_t tid, uint32_t N, uint32_t i) {
 #endif
   return x;
 }
+
+// warp1 - top2 elements
+// warp2 - top2 elements
+// warp3 - top2 elements
+
+// 10 9 7 8 8 6
+// 5 4 -1 2  2
+// if top 
+
+
 
 template <uint32_t K__, typename KT>
 __global__ void RunTopK_subranges(const KT * __restrict__ data, uint32_t n, 
@@ -705,8 +725,8 @@ void* GetTopKKernelForK(size_t n_threads) {
 #else  
   return reinterpret_cast<void*>(
         //RunTopK_subranges<K, T>);
-        //RunTopK_bitonic_shuffle<K, T>);
-        RunTopK_test<T>);
+        RunTopK_bitonic_shuffle<K, T>);
+        // RunTopK_test<T>);
 #endif
 }
 
