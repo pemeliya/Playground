@@ -8,106 +8,11 @@
 #include "topk_kernel.h"
 #include "common/common_utils.hpp"
 
-size_t NumThreadsNew(size_t n, size_t k, size_t batch_size) 
-{
-  size_t warp_size = COMPILE_FOR_ROCM ? 64 : 32;
-  size_t n_threads = (n / k), n_threads_warp = 
-        ((n_threads + warp_size - 1) / warp_size) * warp_size;
-
-  // for large k, reduce maximal block size to reduce register pressure
-  size_t max_threads = (k > 8 ? 512 : 1024);
-  n_threads_warp = std::min(n_threads_warp, max_threads);
-  
-  VLOG(0) << "n: " << n << "; k: " << k << " n_threads: " << n_threads 
-      << "; n_threads_warp: " << n_threads_warp;
-  return 0;
-}
-
-size_t NumThreads(size_t n, size_t k, size_t batch_size) {
-  // Estimate number of threads per block that can run concurrently given the
-  // register footprint.
-  size_t threads_per_block =
-      std::min(512 * (16 / k), kTopKMaxThreadsPerBlock);
-  // Minimum amount of data that each thread needs to receive for the algorithm.
-  size_t min_slice = std::bit_floor(n / std::bit_ceil(k));
-  VLOG(0) << "threads_per_block, min_slice: " << threads_per_block << ',' << min_slice;
-  return std::min(threads_per_block, min_slice);
-}
-
-// Helper type for converting the untyped arguments of RunTopk to TypedTopk
-template <typename T>
-struct TopkArgs {
-  T* data;
-  size_t num_elements;
-  T* top_elements;
-  uint32_t* top_indices;
-  size_t k;
-  size_t batch_size;
-};
-
-void calcOccupancy(const void *kernel) {
-  // size_t dynSHMem = 0;
-  // CHK(cudaOccupancyAvailableDynamicSMemPerBlock(&dynSHMem, kernel, 4, 512)); 
-  // VLOG(0) << "Shared mem available: " << (double)dynSHMem/1024.0 << "KB" ;
-
-  int numBlocks = 0;
-  CHK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&numBlocks, 
-      kernel, 512, 24*1024));
-  VLOG(0) << "Max active blocks: " << numBlocks;
-
-  int minGridSize = 0, blockSize = 0;
-  CHK(cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, kernel, 
-      32*1024, 512));
-  VLOG(0) << "minGridSize: " << minGridSize << " potential BlockSize: " << blockSize;
-}
-
-template <typename T>
-void TypedTopK(TopkArgs<T> args) 
-{
-  uint32_t num_threads = NumThreads(args.num_elements, args.k, args.batch_size);
-  if (num_threads == 0) {
-    throw std::runtime_error(
-        "Invalid kernel parameters. This is likely a bug in the "
-        "TopkSpecializer.");
-  }
-  void* kernel = GetKernel<T>(num_threads, args.k);
-
-  uint32_t blocks_per_grid = args.batch_size;
-  constexpr size_t max_kv_size = sizeof(uint64_t);
-  // Allocate shmem assuming we have a full reduction.
-#if USE_TOPK_DEFAULT  
-  uint32_t shmem_size = std::bit_ceil(args.k) * max_kv_size * WARP_SIZE;
-#else
-  //num_threads = args.num_elements / std::bit_ceil(args.k);
-  num_threads = 64;
-  num_threads = (num_threads + WARP_SIZE - 1) & ~(WARP_SIZE - 1);
-  // 16Kb per block => 4096 words of mem; 512 threads => 16 elements per thread
-  uint32_t shmem_size = num_threads * sizeof(uint32_t) / 2;
-#endif
-  VLOG(0) << "Testing N = " << args.num_elements << "; K = " << args.k <<
-          "; batch_size: " << args.batch_size << 
-          "; n_blocks: " << blocks_per_grid << "; shmem_size: " << shmem_size
-        << " num_threads: " << num_threads;
-
-  void* kernel_args[] = {&args.data, &args.num_elements, &args.top_elements,
-                         &args.top_indices, &args.k};
-
-  //calcOccupancy(kernel);
-  CU_BEGIN_TIMING(0)
-  (void)cudaLaunchKernel(kernel, blocks_per_grid, num_threads, kernel_args,
-                       shmem_size, 0);
-  CU_END_TIMING("TopK N = %zu; K = %zu; batch_size: %zu", 
-      args.num_elements, args.k, args.batch_size);
-
-  CHK(cudaPeekAtLastError());
-  (void)cudaDeviceSynchronize();                       
-}
-
 template < class NT >
-void benchmark_topk(size_t batch_size, size_t N, size_t K, bool verify = true) 
+void benchmark_topk(TopKType type, 
+            size_t batch_size, size_t N, size_t K, bool verify = true) 
 {
-  const size_t in_total = batch_size * N,
-         out_total = batch_size * K;
+  const size_t in_total = batch_size * N, out_total = batch_size * K;
   HVector< NT > values(in_total), top_elems(out_total);
   HVector< int32_t > indices(out_total);
 
@@ -115,20 +20,20 @@ void benchmark_topk(size_t batch_size, size_t N, size_t K, bool verify = true)
   int seed = 1112;//rd();   // ensure determinism
   mersenne::init_genrand(seed);
   for(size_t i = 0; i < in_total; i++) {
-    RandomBits(values[i]);
-    //values[i] = i+1;
+    RandomBits(values[i]);     //values[i] = i+1;
   }
   values.copyHToD();
-  TypedTopK< NT >(
-    TopkArgs {
+  TopkArgs args =  {
       .data = values.devPtr,
-      .num_elements = N,
       .top_elements = top_elems.devPtr,
       .top_indices = (uint32_t *)indices.devPtr,
+      .type = type,
+      .num_elems = N,
       .k = K,
-      .batch_size = batch_size
-    });
-
+      .batch_size = batch_size};
+  
+  //RunPerWarpTopK(args);
+  RunBitonicTopK(args);
   if(!verify) return;
 
   top_elems.copyDToH();
@@ -167,7 +72,7 @@ void benchmark_topk(size_t batch_size, size_t N, size_t K, bool verify = true)
 int main() try 
 {
   DeviceInit();
-  benchmark_topk< uint32_t >(1, 1024*2, 16, true);
+  benchmark_topk< uint32_t >(TopKType::U32, /*batch_size*/1, 1024*2, 16, true);
   return 0;
 
   //size_t batch_size, size_t N, size_t K

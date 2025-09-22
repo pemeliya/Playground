@@ -13,33 +13,34 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef XLA_SERVICE_GPU_RUNTIME_TOPK_KERNEL_H_
-#define XLA_SERVICE_GPU_RUNTIME_TOPK_KERNEL_H_
+#ifndef TOPK_KERNEL_H_
+#define TOPK_KERNEL_H_
 
 #include <stddef.h>
 #include <stdint.h>
 
-#if COMPILE_FOR_ROCM  // warp size is 64 for ROCM
-#define WARP_SIZE 64
-#else // NVIDIA
-#define WARP_SIZE 32 
-#endif
+enum class TopKType : int32_t {
+  I16,
+  U16,
+  I32,
+  U32,
+  F16,
+  BF16,
+  F32,
+  F64,
+};
 
-#define USE_TOPK_DEFAULT 0
+struct TopkArgs {
+  const void* data;
+  void* top_elements;
+  uint32_t* top_indices;
+  TopKType type;  
+  size_t num_elems;
+  size_t k;
+  size_t batch_size;
+};
 
-constexpr size_t kTopKMaxThreadsPerBlock = 1024;
+void RunPerWarpTopK(TopkArgs& args);
+void RunBitonicTopK(TopkArgs& args);
 
-template <typename T, size_t K>
-void* GetTopKKernelForK(size_t n_threads);
-
-template <typename T>
-void* GetKernel(size_t n_threads, size_t k) {
-  // if (k <= 1) return GetTopKKernelForK<T, 1>(n_threads);
-  // if (k <= 2) return GetTopKKernelForK<T, 2>(n_threads);
-  // if (k <= 4) return GetTopKKernelForK<T, 4>(n_threads);
-  //if (k <= 8) return GetTopKKernelForK<T, 8>(n_threads);
-  if (k <= 16) return GetTopKKernelForK<T, 16>(n_threads);
-  return nullptr;
-}
-
-#endif  // XLA_SERVICE_GPU_RUNTIME_TOPK_KERNEL_H_
+#endif  // TOPK_KERNEL_H_

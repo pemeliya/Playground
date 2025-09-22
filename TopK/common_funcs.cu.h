@@ -5,6 +5,19 @@
 #include <math.h>
 #include "common/common.h"
 
+#define OUTZ(fmt, ...) printf(fmt"\n", ##__VA_ARGS__)
+#define OUTREGSZ(SZ, fmt, ...) \
+    for(uint32_t i = 0; i < SZ; i++) { \
+      printf("%d: " fmt "\n", i, ##__VA_ARGS__); \
+    }
+#define LOUTZ(fmt, ...) printf("%d :" fmt "\n", lane, ##__VA_ARGS__)
+
+#if COMPILE_FOR_ROCM  // warp size is 64 for ROCM
+#define WARP_SIZE 64
+#else // NVIDIA
+#define WARP_SIZE 32 
+#endif
+
 #if !COMPILE_FOR_ROCM
 __device__ FORCEINLINE float divApprox(float a, float b) {
     float res;

@@ -1,170 +1,15 @@
 
-#ifndef TOPK_KERNEL_CU_H_
-#define TOPK_KERNEL_CU_H_
-
-// This file contains bespoke and optimized implementation for TopK shapes. When
-// adding support for new shapes/dtypes, you also need to modify the rewritter
-// on topk_specializer.cc for these changes to be picked up.
-
 #include "topk_kernel.h"
 #include "common_funcs.cu.h"
+#include "common/common_utils.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 
-/*
-__device__
-inline
-int __shfl_xor(int var, int lane_mask, int width = WARP_SIZE) {
-    int self = __lane_id();
-    int index = self^lane_mask;
-    index = index >= ((self+width)&~(width-1))?self:index;
-    return __builtin_amdgcn_ds_bpermute(index<<2, var);
-}
-*/
-
-#define OUTZ(fmt, ...) printf(fmt"\n", ##__VA_ARGS__)
-#define OUTREGSZ(SZ, fmt, ...) \
-    for(uint32_t i = 0; i < SZ; i++) { \
-      printf("%d: " fmt "\n", i, ##__VA_ARGS__); \
-    }
-#define LOUTZ(fmt, ...) printf("%d :" fmt "\n", lane, ##__VA_ARGS__)
-
-
 // bitonic TopK: https://github.com/anilshanbhag/gpu-topk
 
-template <size_t K, typename KT>
-struct TopK {
-  struct KVT {
-    KT key;
-    uint32_t idx;
-    __device__ FORCEINLINE bool operator >(const KVT& rhs) {
-      return key == rhs.key ? idx < rhs.idx : key > rhs.key;
-    }
-  };
-
-  __device__ TopK(void* buffer, int num_outputs)
-      : buffer_(reinterpret_cast<KVT*>(buffer)), num_outputs_(num_outputs) {}
- 
-__device__ FORCEINLINE uint32_t Idx(uint32_t i) {
-  return blockDim.x * i + threadIdx.x;
-}
-  // Compute a per-warp topk of a slice of data.
-  __device__ void PerWarpTopK(KT* key, int n) {
-
-    KVT tmp[K];
-    // TODO(doak): Use bitonic sort.
-#pragma unroll    
-    for (int i = 0; i < K; i++) {
-        tmp[i] = {key[Idx(i)], Idx(i)};
-    }
-#pragma unroll    
-    for (int i = 0; i < K; i++) {
-      for (int j = i + 1; j < K; j++) {
-        KVT ti = tmp[i];
-        KVT tj = tmp[j];
-        bool cmp = ti > tj;
-        tmp[i] = cmp ? ti : tj;
-        tmp[j] = cmp ? tj : ti;
-      }
-    }
-
-    for (int idx = K; idx < n; idx++) {
-      KVT kv{key[Idx(idx)], Idx(idx)};
-      Push(tmp, kv);
-    }
-    
-    Reduce(tmp, WARP_SIZE);
-
-    if (threadIdx.x % WARP_SIZE != 0) return;
-    int warp_id = threadIdx.x / WARP_SIZE;
-    for (int i = 0; i < K; i++) {
-      buffer_[i * WARP_SIZE + warp_id] = tmp[i];
-    }
-  }
-
-  // Merge the per-warp topks into a single topk. The final data is written to
-  // `keys` and `idxs`
-  __device__ void MergeTopKs(KT *keys, uint32_t *idxs) {
-    KVT tmp[K];
-    
-    // We only use one warp for this step.
-    if (threadIdx.x >= WARP_SIZE) return;
-    __syncthreads();
-#pragma unroll
-    for (int i = 0; i < K; i++) {
-      tmp[i] = buffer_[i * WARP_SIZE + threadIdx.x];
-    }
-    Reduce(tmp, blockDim.x / WARP_SIZE);
-    if (threadIdx.x != 0) return;
-    for (int i = 0; i < num_outputs_; ++i) {
-      keys[i] = tmp[i].key;
-      idxs[i] = tmp[i].idx;
-    }
-  }
-
-  // Merge `tmp` (a reverse-sorted array) from (0, `num_lanes`) lanes. The
-  // resulting array is stored in the tmp array of lane 0. For all other lanes,
-  // `tmp` is unspecified after this function is called.
-  __device__ FORCEINLINE void Reduce(KVT tmp[K], int num_lanes) {
-    
-    int lane_id = threadIdx.x % WARP_SIZE;
-    for (int offset = num_lanes / 2; offset > 0; offset /= 2) {
-#pragma unroll
-      for (int i = 0; i < K; i++) {
-        KVT kv = gpuShuffle< ShflType::Down >(tmp[i], offset);
-        if (lane_id >= offset) continue;
-        Push(tmp, kv);
-      }
-    }
-  }
-
-  // Given a K-array of previously reverse-sorted KVTs, add kv to it and
-  // remove the smallest element of the resulting array. Preserves the sorted
-  // order of `tmp`.
-  static __device__ FORCEINLINE bool Push(KVT tmp[K], const KVT& kv) 
-  {
-    if (tmp[K - 1] > kv) return false;
-    tmp[K - 1] = kv; // (K-1)th is the smallest element out of K
-#pragma unroll
-    for (int i = (int)K - 2; i >= 0; --i) {
-      if (tmp[i] > kv) break;
-      // Swap
-      KVT t = tmp[i];
-      tmp[i] = tmp[i + 1];
-      tmp[i + 1] = t;
-    }
-    return true;
-  }
-
-  KVT* buffer_;
-  int num_outputs_;
-};
-
-// This shared memory buffer needs to be declared outside of the templated
-// Run(), as otherwise it would generate name conflicts from the multiple
-// instantiations of Run() from the multiple monomorphizations of Run().
 extern __device__ __shared__ int32_t g_shared_mem[];
-
-
-template <size_t K, typename KT>
-__launch_bounds__(1024, 1) __global__
-    void RunTopK_default(KT* data, int n, KT* result, uint32_t* result_idxs, int k) 
-{
-  TopK<K, KT> obj(g_shared_mem, k);
-  
-  auto in = data + n * blockIdx.x;
-  auto vals_out = result + k * blockIdx.x;
-  auto idxs_out = result_idxs + k * blockIdx.x;
-  int slice_size = n / blockDim.x;
-  if (threadIdx.x < n % blockDim.x) {
-    slice_size++;
-  }
- 
-  obj.PerWarpTopK(in, slice_size);
-  obj.MergeTopKs(vals_out, idxs_out);
-}
 
 constexpr uint32_t log2xN(uint32_t x) {
 #pragma unroll
@@ -534,9 +379,6 @@ __device__ KT loadData(uint32_t tid, uint32_t N, uint32_t i) {
 // 10 9 7 8 8 6
 // 5 4 -1 2  2
 // if top 
-
-
-
 template <uint32_t K__, typename KT>
 __global__ void RunTopK_subranges(const KT * __restrict__ data, uint32_t n, 
     KT * __restrict__ result, uint32_t * __restrict__ result_idxs, uint32_t k) 
@@ -718,16 +560,57 @@ __global__ void RunTopK_test(KT* data, uint32_t n, KT* result, uint32_t* result_
   OUTZ("%d: squashed: %d", lane, A[0].key);
 }
 
-template <typename T, size_t K>
-void* GetTopKKernelForK(size_t n_threads) {
-#if USE_TOPK_DEFAULT
-  return reinterpret_cast<void*>(RunTopK_default<K, T>);
-#else  
-  return reinterpret_cast<void*>(
-        //RunTopK_subranges<K, T>);
-        RunTopK_bitonic_shuffle<K, T>);
-        // RunTopK_test<T>);
-#endif
+template < class T >
+void TypedTopK(TopkArgs& args) 
+{
+  uint32_t num_threads = 1024;
+
+#define XKERNEL(K) if(args.k < K) { \
+      return reinterpret_cast< void *>(RunTopK_bitonic_shuffle<K, T>); }
+  auto get_kernel = [&args]() -> void * {
+    //XKERNEL(1) XKERNEL(2) XKERNEL(4) XKERNEL(8) 
+    XKERNEL(16)
+    return nullptr;
+  };
+
+  uint32_t blocks_per_grid = args.batch_size;
+  constexpr size_t max_kv_size = sizeof(uint64_t);
+  uint32_t shmem_size = std::bit_ceil(args.k) * max_kv_size * WARP_SIZE;
+
+  VLOG(0) << "Testing N = " << args.num_elems << "; K = " << args.k <<
+          "; batch_size: " << args.batch_size << 
+          "; n_blocks: " << blocks_per_grid << "; shmem_size: " << shmem_size
+        << " num_threads: " << num_threads;
+
+  auto kernel = get_kernel();
+  void* kernel_args[] = {&args.data, &args.num_elems, &args.top_elements,
+                         &args.top_indices, &args.k};
+
+  CU_BEGIN_TIMING(0)
+  (void)cudaLaunchKernel(kernel, blocks_per_grid, num_threads, kernel_args,
+                        shmem_size, 0);
+  CU_END_TIMING("TopK N = %zu; K = %zu; batch_size: %zu", 
+      args.num_elems, args.k, args.batch_size);
+
+  CHK(cudaPeekAtLastError());
+  (void)cudaDeviceSynchronize();                       
 }
 
-#endif  // TOPK_KERNEL_CU_H_
+void RunBitonicTopK(TopkArgs& args) {
+  switch(args.type) {
+    case TopKType::I16:
+    case TopKType::U16:
+    case TopKType::I32:
+      break;
+    case TopKType::U32:
+      return TypedTopK< uint32_t >(args);
+    case TopKType::F16:
+    case TopKType::BF16:
+      break;
+    case TopKType::F32:
+      break;
+    case TopKType::F64: 
+      break;
+  }
+  throw std::runtime_error("NYI");
+}
