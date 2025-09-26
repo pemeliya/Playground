@@ -9,6 +9,8 @@
 
 // bitonic TopK: https://github.com/anilshanbhag/gpu-topk
 
+#define RUN_BENCHMARK 5
+
 extern __device__ __shared__ int32_t g_shared_mem[];
 
 constexpr uint32_t log2xN(uint32_t x) {
@@ -432,14 +434,16 @@ __global__ void RunTopK_bitonic_shuffle(TopKKernelParams< NT > args)
  
     //LOUTZ("final: %d", A[0].key);
     uint64_t ofs = static_cast< uint64_t>(args.k) * (bidx + gridDim.x * bidy);
-    auto vals_out = args.out_values + ofs + tid;
-    auto idxs_out = args.out_indices + ofs + tid;
-
     uint32_t diff = tid - (K - args.k);
+    auto vals_out = args.out_values + ofs + diff;
+    auto idxs_out = args.out_indices + ofs + diff;
     if(diff < args.k) { // use unsigned compare ! 
        vals_out[0] = A[0].key;
        idxs_out[0] = A[0].idx;
-      // LOUTZ("batch: %d bidx: %d output key: %u idx: %u", bidy, bidx, A[0].key, A[0].idx);
+       // max values will be in tids from 
+       // [K - args.k.. WARP_SIZE-1]
+      //  LOUTZ("batch: %d bidx: %d tid: %d output key: %u idx: %u", 
+      //       bidy, bidx, tid, A[0].key, A[0].idx);
     }
   } // if(warpId)  
 } // RunTopK_bitonic_shuffle
@@ -467,15 +471,18 @@ __global__ void RunTopK_bitonic_merge(TopKKernelParams< NT > args)
   // cannot be handled by a single block
 
   // each warp reads one size-k sequence.. might not be very efficient though..
-  uint32_t idx = wid * args.k + lane;
+  // values: 0..k-1 (0..49)
+  // shall be loaded to [K - args.k .. 63] = [14..63]
+
+  uint32_t Kdiff = K - args.k;
+  uint32_t idx = wid * args.k + lane - Kdiff;
   constexpr uint32_t I = 1;
+
   KVT A[I] = {minVal, 0};
-  if (lane < args.k) {
+  if (lane - Kdiff < args.k) { // unsigned compare !!
     A[0].key = in_vals[idx];
     A[0].idx = in_idxs[idx];
-//     OUTZ("batch: %d tid: %d original: %u %u", bidy, tid, A[0].key, A[0].idx);
   }
-
   // n_total = blocks.x * args.k
   // suppose block.x = 98
   // BlockSz = 1024 => 16 warps
@@ -486,35 +493,36 @@ __global__ void RunTopK_bitonic_merge(TopKKernelParams< NT > args)
   int i = 0;
   for(idx += BlockSz / WARP_SIZE * args.k; ; idx += BlockSz / WARP_SIZE * args.k, i++) {
     
-    uint32_t maxi = idx - lane + args.k - 1; // maximal index per warp
-    if(maxi >= args.n_total) { // retire completely unused warps
-       break;
-    }
-
+    // retire completely unused warps
+    if (uint32_t  maxi = idx - lane + K - 1; maxi >= args.n_total) break;
+    
     KVT B[I] = {minVal, 0};
-    if (lane < args.k && idx < args.n_total) {
+    if (uint32_t Kdiff = K - args.k; lane - Kdiff < args.k && idx < args.n_total) {
       B[0] = { in_vals[idx], in_idxs[idx]};
 //      OUTZ("batch: %d tid: %d idx: %d, B: %d / %d", bidy, tid, idx, B[0].key, B[0].idx);
     }
     topk.merge(A[0], B[0]);
     topk.rebuild(A);
   }
+  // OUTZ("before merge batch: %d tid: %d idx: %d, A: %d / %d", bidy, tid, idx, A[0].key, A[0].idx);
   
   topk.merge_warps(tid, BlockSz, A, (KVT *)g_shared_mem);
+
+  // if(A[0].key == 1110) 
+  // OUTZ("after merge batch: %d tid: %d idx: %d, A: %d / %d", bidy, tid, idx, A[0].key, A[0].idx);
 
   if (tid < WARP_SIZE) {
     //OUTZ("batch: %d tid: %d after merge A: %d / %d", bidy, tid, A[0].key, A[0].idx);
     topk.template final_reduce< true >(A, KVT{minVal, 0});
  
     uint64_t ofs = static_cast< uint64_t>(args.k) * bidy;
-    auto vals_out = args.out_values + ofs + tid;
-    auto idxs_out = args.out_indices + ofs + tid;
-
     uint32_t diff = tid - (K - args.k);
+    auto vals_out = args.out_values + ofs + diff;
+    auto idxs_out = args.out_indices + ofs + diff;
     if(diff < args.k) { // use unsigned compare ! 
        vals_out[0] = A[0].key;
        idxs_out[0] = A[0].idx;
-       // LOUTZ("output key: %u idx: %u", A[0].key, A[0].idx);
+      //  LOUTZ("output key: %u idx: %u", A[0].key, A[0].idx);
     }
   } // if(warpId)  
 }
@@ -673,8 +681,8 @@ void TypedTopK(TopkArgs& args)
         reinterpret_cast< void *>(RunTopK_bitonic_merge< K, T>)  \
       }; }
   auto get_kernels = [&args]() -> std::tuple<void *,void *> {
-    //XKERNELS(1) XKERNELS(2) XKERNELS(4) XKERNELS(8) 
-    XKERNELS(16)
+    //XKERNELS(1) XKERNELS(2) XKERNELS(4) XKERNELS(8) XKERNELS(16) XKERNELS(32) 
+    XKERNELS(64)
     return std::tuple{ nullptr, nullptr };
   };
 #undef XKERNELS
@@ -726,7 +734,7 @@ void TypedTopK(TopkArgs& args)
   };
   void* kernel_args[] = {&params};
 
-  CU_BEGIN_TIMING(5)
+  CU_BEGIN_TIMING(RUN_BENCHMARK)
   (void)cudaLaunchKernel(sort_kernel, blocks, block_sz, kernel_args,
                         shmem_size, 0); 
 
@@ -759,8 +767,10 @@ void TypedTopK(TopkArgs& args)
     
     dim3 merge_blocks(1, blocks.y);
     uint32_t mshmem_size = merge_block_sz * sizeof(uint64_t) * 4; 
-    // VLOG(0) << "-------- launching merge kernel #blockSz " << merge_block_sz
-    //          << " n_total " << merge_params.n_total;
+    if (!RUN_BENCHMARK) {
+      VLOG(0) << "-------- launching merge kernel #blockSz " << merge_block_sz
+             << " n_total " << merge_params.n_total;
+    }
     void* kargs[] = {&merge_params};
     (void)cudaLaunchKernel(merge_kernel, merge_blocks, merge_block_sz, kargs,
                         mshmem_size, 0);

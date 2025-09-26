@@ -86,7 +86,7 @@ void benchmark_topk(TopKType type,
 int main() try 
 {
   DeviceInit();
-  benchmark_topk< uint32_t >(TopKType::U32, /*batch_size*/59, 10000, 16, true);
+  benchmark_topk< uint32_t >(TopKType::U32, /*batch_size*/59, 100000, 50, true);
   return 0;
 
   //size_t batch_size, size_t N, size_t K
