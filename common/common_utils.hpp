@@ -179,7 +179,7 @@ private:
 //! \c print_when_differs :  indicates whether print elements only if they differ (default)
 //! \c print_max : maximal # of entries to print
 template < bool Reverse = false, class NT >
-bool checkme(const NT *checkit, const NT *truth, size_t width, size_t stride,
+bool checkme(const std::string& msg, const NT *checkit, const NT *truth, size_t width, size_t stride,
         size_t n_batches, const NT& eps, bool print_when_differs = true,
              size_t print_max = std::numeric_limits< size_t >::max()) {
 
@@ -223,7 +223,7 @@ bool checkme(const NT *checkit, const NT *truth, size_t width, size_t stride,
 
             if((isDiff || !print_when_differs) && printed < print_max) {
                 printed++;
-                std::cerr << j << '(' << i << ") (GPU, truth): " <<
+                std::cerr << msg << ": " << j << '(' << i << ") (GPU, truth): " <<
                    check << " and " << truth << " ; diff: " << diff 
                    << (isDiff ? " DIFFERS\n" : "\n");
             }
