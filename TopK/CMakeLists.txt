@@ -92,5 +92,8 @@ if(NOT ${COMPILE_FOR_ROCM})
 #)
     target_link_libraries(${PROJECT_NAME} ${CUDA_CUDART_LIBRARY} ${CUDA_CUDA_LIBRARY})
 else()
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        $<$<COMPILE_LANGUAGE:HIP>:-Rpass-analysis=kernel-resource-usage>
+    )
     set_property(TARGET ${PROJECT_NAME} PROPERTY HIP_ARCHITECTURES gfx90a)
 endif()

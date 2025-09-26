@@ -14,9 +14,19 @@
 
 #if COMPILE_FOR_ROCM  // warp size is 64 for ROCM
 #define WARP_SIZE 64
+#define SGLOBAL    __attribute__((address_space(1)))
+#define SLOCAL     __attribute__((address_space(3))) // fast LDS memory
+#define SCONSTANT  __attribute__((address_space(4)))
+#define SPRIVATE   __attribute__((address_space(5)))
 #else // NVIDIA
 #define WARP_SIZE 32 
+#define SGLOBAL
+#define SLOCAL
+#define SCONSTANT
+#define SPRIVATE
 #endif
+
+constexpr uint32_t kTopKMaxThreadsPerBlock = 1024;
 
 #if !COMPILE_FOR_ROCM
 __device__ FORCEINLINE float divApprox(float a, float b) {

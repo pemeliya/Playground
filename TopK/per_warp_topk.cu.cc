@@ -7,8 +7,6 @@
 #include <cstdint>
 #include <limits>
 
-constexpr size_t kTopKMaxThreadsPerBlock = 1024;
-
 template <size_t K, typename NT>
 struct TopK {
   struct KVT {
@@ -192,7 +190,7 @@ void TypedTopK(TopkArgs& args)
   CU_BEGIN_TIMING(0)
   (void)cudaLaunchKernel(kernel, blocks_per_grid, num_threads, kernel_args,
                         shmem_size, 0);
-  CU_END_TIMING("TopK N = %zu; K = %zu; batch_size: %zu", 
+  CU_END_TIMING("TopK N = %zu; K = %u; batch_size: %u", 
       args.num_elems, args.k, args.batch_size);
 
   CHK(cudaPeekAtLastError());

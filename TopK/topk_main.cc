@@ -10,7 +10,7 @@
 
 template < class NT >
 void benchmark_topk(TopKType type, 
-            size_t batch_size, size_t N, size_t K, bool verify = true) 
+            size_t batch_size, size_t N, uint32_t K, bool verify = true) 
 {
   const size_t in_total = batch_size * N, out_total = batch_size * K;
   HVector< NT > values(in_total), top_elems(out_total);
@@ -20,11 +20,14 @@ void benchmark_topk(TopKType type,
   int seed = 1112;//rd();   // ensure determinism
   mersenne::init_genrand(seed);
   for(size_t i = 0; i < in_total; i++) {
-    RandomBits(values[i]);
-    // size_t m1 = i+1;
-    // values[i] = (m1*m1*m1 - 7777)%513;
+    // RandomBits(values[i]);
+     size_t m1 = i+1;
+     values[i] = (m1*m1*m1 - 7777)%5113;
     // VLOG(0) << i << " val = " << values[i];
   }
+  values[0] = std::numeric_limits< NT >::max()-1;
+  values[in_total-1] = std::numeric_limits< NT >::max();
+
   values.copyHToD();
   TopkArgs args =  {
       .data = values.devPtr,
@@ -33,7 +36,7 @@ void benchmark_topk(TopKType type,
       .type = type,
       .num_elems = N,
       .k = K,
-      .batch_size = batch_size};
+      .batch_size = static_cast< uint32_t >(batch_size)};
   
   //RunPerWarpTopK(args);
   RunBitonicTopK(args);
@@ -76,7 +79,7 @@ void benchmark_topk(TopKType type,
 int main() try 
 {
   DeviceInit();
-  benchmark_topk< uint32_t >(TopKType::U32, /*batch_size*/1, 1024*2, 16, true);
+  benchmark_topk< uint32_t >(TopKType::U32, /*batch_size*/100, 100000, 16, true);
   return 0;
 
   //size_t batch_size, size_t N, size_t K

@@ -73,27 +73,30 @@ struct HVector : std::vector< NT > {
    }
 
    HVector& operator=(HVector&& rhs) noexcept {
-     Base::operator=(std::move(rhs));
-     devPtr = rhs.devPtr;
-     rhs.devPtr = nullptr;
+     rhs.swap(*this);
      return *this;
    }
 
    void swap(HVector& lhs) noexcept {
-    std::swap(devPtr, lhs.devPtr);
-    this->swap(lhs);
+     std::swap(devPtr, lhs.devPtr);
+     Base::swap(lhs);
    }
 
    HVector(std::initializer_list< NT > l) : Base(l) {
        CHK(cudaMalloc((void**)&devPtr, l.size()*sizeof(NT)))
    }
-   HVector(size_t N) : Base(N, NT{}) {
-       CHK(cudaMalloc((void**)&devPtr, N*sizeof(NT)))
+   HVector(size_t N, bool allocHost = true) {
+      if (allocHost) {
+        Base::resize(N, NT{});
+      }
+      CHK(cudaMalloc((void**)&devPtr, N*sizeof(NT)))
    }
    void copyHToD() {
+      //if (Base::empty()) throw std::runtime_error("copyHToD empty!");
       CHK(cudaMemcpy(devPtr, this->data(), this->size()*sizeof(NT), cudaMemcpyHostToDevice))
    }
    void copyDToH() {
+      //if (Base::empty()) throw std::runtime_error("copyDToH empty!");
       CHK(cudaMemcpy(this->data(), devPtr, this->size()*sizeof(NT), cudaMemcpyDeviceToHost))
    }
    ~HVector() {

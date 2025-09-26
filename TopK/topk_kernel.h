@@ -36,8 +36,8 @@ struct TopkArgs {
   uint32_t* top_indices;
   TopKType type;  
   size_t num_elems;
-  size_t k;
-  size_t batch_size;
+  uint32_t k;
+  uint32_t batch_size;
 };
 
 void RunPerWarpTopK(TopkArgs& args);
