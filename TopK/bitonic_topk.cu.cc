@@ -9,7 +9,7 @@
 
 // bitonic TopK: https://github.com/anilshanbhag/gpu-topk
 
-#define RUN_BENCHMARK 5
+#define RUN_BENCHMARK 10
 
 extern __device__ __shared__ int32_t g_shared_mem[];
 
@@ -374,8 +374,10 @@ struct TopKKernelParams {
   uint32_t n_total, n_per_block, k;
 };
 
+#define MAX_THREADS_SHUFFLE 256
+
 template < uint32_t K, typename NT>
-__launch_bounds__(512, 1) // HACK HACK
+__launch_bounds__(MAX_THREADS_SHUFFLE, 1) // HACK HACK
 __global__ void RunTopK_bitonic_shuffle(TopKKernelParams< NT > args) 
 {
   using TopK = BitonicTopK< K, NT >;
@@ -688,7 +690,7 @@ void TypedTopK(TopkArgs& args)
 #undef XKERNELS
 
   // elems_per_thread - #of elements processed per thread (average)
-  uint32_t block_sz = 256, elems_per_thread = 4,
+  uint32_t block_sz = MAX_THREADS_SHUFFLE, elems_per_thread = 4,
                 elems_per_block = block_sz * elems_per_thread;
 
   // #threads: 256, #per_block = 256*4 = 1024
@@ -766,8 +768,8 @@ void TypedTopK(TopkArgs& args)
     uint32_t merge_block_sz = n_warps * WARP_SIZE;
     
     dim3 merge_blocks(1, blocks.y);
-    uint32_t mshmem_size = merge_block_sz * sizeof(uint64_t) * 4; 
-    if (!RUN_BENCHMARK) {
+    uint32_t mshmem_size = merge_block_sz * sizeof(uint64_t); 
+    if (true || !RUN_BENCHMARK) {
       VLOG(0) << "-------- launching merge kernel #blockSz " << merge_block_sz
              << " n_total " << merge_params.n_total;
     }
