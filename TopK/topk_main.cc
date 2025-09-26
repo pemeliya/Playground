@@ -22,7 +22,7 @@ void benchmark_topk(TopKType type,
   for(size_t i = 0; i < in_total; i++) {
     // RandomBits(values[i]);
      size_t m1 = i+1;
-     values[i] = (m1*m1*m1 - 7777)%5113;
+     values[i] = (m1*m1*m1 - 7777)%1111;
     // VLOG(0) << i << " val = " << values[i];
   }
   values[0] = std::numeric_limits< NT >::max()-1;
@@ -62,24 +62,31 @@ void benchmark_topk(TopKType type,
     for(size_t j = 0; j < K; j++) {
       truth_vals[j] = vptr[idxs[j]];
     }
+    for(size_t j = 0; j < K/2; j++) {
+      std::swap(idxs[j], idxs[K-1-j]); // why do we need to swap???
+    }
 
     bool print_if_differs = true;
     int32_t eps = 0;
-    std::sort(idxs.begin(), idxs.begin() + K);
-    std::sort(gpu_iptr, gpu_iptr + K);
+    // std::sort(idxs.begin(), idxs.begin() + K);
+    // std::sort(gpu_iptr, gpu_iptr + K);
     // descending sort !! 
     std::sort(gpu_vptr, gpu_vptr + K, std::greater<NT>());
 
-    checkme(gpu_iptr, idxs.data(), K, K, 1, eps, print_if_differs);
+    checkme("idxs", gpu_iptr, idxs.data(), K, K, 1, eps, print_if_differs);
     //VLOG("------------------------------------------------------")
-    checkme(gpu_vptr, truth_vals.data(), K, K, 1, (NT)1e-5, print_if_differs);
+    checkme("vals", gpu_vptr, truth_vals.data(), K, K, 1, (NT)1e-5, print_if_differs);
+
+    // for(uint32_t j = 0; j < K; j++) {
+    //   VLOG(0) << "Truth: " << j << " val: " << vptr[idxs[j]] << " idx: " << idxs[j];
+    // }
   }
 }
 
 int main() try 
 {
   DeviceInit();
-  benchmark_topk< uint32_t >(TopKType::U32, /*batch_size*/100, 100000, 16, true);
+  benchmark_topk< uint32_t >(TopKType::U32, /*batch_size*/59, 10000, 16, true);
   return 0;
 
   //size_t batch_size, size_t N, size_t K

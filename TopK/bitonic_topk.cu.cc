@@ -250,7 +250,7 @@ int __shfl_xor(int var, int lane_mask, int width = WARP_SIZE) {
         const uint32_t blockSz, KVT (&A)[1], KVT *sh) 
   {
     const auto warpId = tid / WARP_SIZE;
-#if 0
+#if 0 // debug version simple
     const auto lane = gpuLaneId();
     sh[tid] = A[0];
     __syncthreads();
@@ -262,6 +262,16 @@ int __shfl_xor(int var, int lane_mask, int width = WARP_SIZE) {
       }
     }
 #else
+    // NOTE NOTE: this version assumes that blockSz is a power of two: full binary tree
+    // warps:
+    // 0 1 2 3 4 5 6 7
+    // step 1: 0+4 1+5 2+6 3+7
+
+    // warps:
+    // 0 1 2 3 4 5 6 7
+    // step 1: 0+4 1+5 2+6 3+7
+
+
     if(int32_t idx = tid - blockSz / 2; idx >= 0) { // only upper threads need to write
       sh[idx] = A[0];
     }
@@ -412,8 +422,12 @@ __global__ void RunTopK_bitonic_shuffle(TopKKernelParams< NT > args)
   // LOUTZ("final A: %u, %d", A[0].key, A[0].idx);
 
   topk.merge_warps(tid, BlockSz, A, (KVT *)g_shared_mem);
+
+  // NOTE: I assume finalRebuild is only necessary when we are not planning
+  // to merge results from several blocks..
+  // otherwise - there is no point doing it => we can just write the result as it is to global mem
+  // and then read full warps ?
   if(tid < WARP_SIZE) {
-    // NOTE: do we need that final rebuild ??
     topk.template final_reduce< true >(A, KVT{minVal, 0});
  
     //LOUTZ("final: %d", A[0].key);
@@ -459,7 +473,7 @@ __global__ void RunTopK_bitonic_merge(TopKKernelParams< NT > args)
   if (lane < args.k) {
     A[0].key = in_vals[idx];
     A[0].idx = in_idxs[idx];
-    // OUTZ("batch: %d tid: %d original: %u %u", bidy, tid, A[0].key, A[0].idx);
+//     OUTZ("batch: %d tid: %d original: %u %u", bidy, tid, A[0].key, A[0].idx);
   }
 
   // n_total = blocks.x * args.k
@@ -480,7 +494,7 @@ __global__ void RunTopK_bitonic_merge(TopKKernelParams< NT > args)
     KVT B[I] = {minVal, 0};
     if (lane < args.k && idx < args.n_total) {
       B[0] = { in_vals[idx], in_idxs[idx]};
-      // OUTZ("batch: %d tid: %d idx: %d, B: %d / %d", bidy, tid, idx, B[0].key, B[0].idx);
+//      OUTZ("batch: %d tid: %d idx: %d, B: %d / %d", bidy, tid, idx, B[0].key, B[0].idx);
     }
     topk.merge(A[0], B[0]);
     topk.rebuild(A);
@@ -489,6 +503,7 @@ __global__ void RunTopK_bitonic_merge(TopKKernelParams< NT > args)
   topk.merge_warps(tid, BlockSz, A, (KVT *)g_shared_mem);
 
   if (tid < WARP_SIZE) {
+    //OUTZ("batch: %d tid: %d after merge A: %d / %d", bidy, tid, A[0].key, A[0].idx);
     topk.template final_reduce< true >(A, KVT{minVal, 0});
  
     uint64_t ofs = static_cast< uint64_t>(args.k) * bidy;
@@ -727,15 +742,28 @@ void TypedTopK(TopkArgs& args)
       .k = args.k,
     };
 
-    uint32_t merge_block_sz = std::min(blocks.x * WARP_SIZE, 128u);
+    uint32_t n_warps = std::min(blocks.x, kTopKMaxThreadsPerBlock / WARP_SIZE);
+    // we have to ensure block size is a power-of-two: otherwise algo
+    if (n_warps & (n_warps-1)) {
+      for (int x_warps = 2; x_warps <= kTopKMaxThreadsPerBlock / WARP_SIZE; x_warps *= 2) {
+        if (n_warps <= x_warps) {
+          n_warps = x_warps;
+          break;
+        }
+      }
+      // e.g. if blocks.x=9 => n_warps=16 => waste of resources
+      // we have: blocks.x < n_warps
+      if (auto ratio = (float)blocks.x / n_warps; ratio < 0.9f) n_warps /= 2;
+    }
+    uint32_t merge_block_sz = n_warps * WARP_SIZE;
+    
     dim3 merge_blocks(1, blocks.y);
-    uint32_t mshmem_size = merge_block_sz * sizeof(uint64_t); 
-
+    uint32_t mshmem_size = merge_block_sz * sizeof(uint64_t) * 4; 
     // VLOG(0) << "-------- launching merge kernel #blockSz " << merge_block_sz
-    //         << " n_total " << merge_params.n_total;
+    //          << " n_total " << merge_params.n_total;
     void* kargs[] = {&merge_params};
     (void)cudaLaunchKernel(merge_kernel, merge_blocks, merge_block_sz, kargs,
-                        shmem_size, 0);
+                        mshmem_size, 0);
 
   }
 
