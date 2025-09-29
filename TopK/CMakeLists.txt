@@ -95,5 +95,5 @@ else()
     target_compile_options(${PROJECT_NAME} PRIVATE
         $<$<COMPILE_LANGUAGE:HIP>:-Rpass-analysis=kernel-resource-usage>
     )
-    set_property(TARGET ${PROJECT_NAME} PROPERTY HIP_ARCHITECTURES gfx90a)
+    set_property(TARGET ${PROJECT_NAME} PROPERTY HIP_ARCHITECTURES gfx942)
 endif()

@@ -35,7 +35,7 @@ struct TopkArgs {
   void* top_elements;
   uint32_t* top_indices;
   TopKType type;  
-  size_t num_elems;
+  uint32_t num_elems;
   uint32_t k;
   uint32_t batch_size;
 };

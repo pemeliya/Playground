@@ -9,7 +9,11 @@
 
 // bitonic TopK: https://github.com/anilshanbhag/gpu-topk
 
-#define RUN_BENCHMARK 10
+#define RUN_BENCHMARK 5
+#define MAX_THREADS_SHUFFLE 512
+#define USE_TEST_KERNEL 0
+#define SORT_STEP_USE_BPERMUTE 0
+#define SORT_STEP_USE_DPP_XOR 0 // if SORT_STEP_USE_BPERMUTE is 0 => use DPP or swizzle
 
 extern __device__ __shared__ int32_t g_shared_mem[];
 
@@ -39,6 +43,96 @@ __device__ FORCEINLINE void xswap(NT& a, NT& b) {
 template < class T, class U, class Common = std::common_type_t<T, U> >
 Common CeilOfRatio(T num, U denom) {
   return (num + denom - 1) / denom;
+}
+
+template < uint32_t STRIDE, class NT >
+__device__ FORCEINLINE NT sort_step_const(NT val) {
+  
+  constexpr uint32_t SZ = (sizeof(NT) + sizeof(uint32_t)-1)/sizeof(uint32_t);
+  union S {
+      NT v;
+      uint32_t d[SZ];
+  };
+  S in{ val }, res{};
+
+  static_assert(STRIDE <= WARP_SIZE/2);
+
+  constexpr int row_mask = 0xf;
+  constexpr int bank_mask = 0xf;
+  constexpr bool bound_ctrl = true;
+
+  // this shall be optimized out hopefully
+  uint32_t perm_xor = (gpuLaneId() ^ STRIDE) << 2;
+#pragma unroll
+  for(uint32_t i = 0; i < SZ; i++) {
+    switch(STRIDE) {
+    case 1:
+#if SORT_STEP_USE_DPP_XOR
+      res.d[i] = __builtin_amdgcn_mov_dpp(in.d[i],
+              0xb1, // quad_perm: [1,0,3,2]
+              row_mask, bank_mask, bound_ctrl);
+#else
+      res.d[i] = __builtin_amdgcn_ds_swizzle(in.d[i], 0x041F);
+#endif
+      break;
+    case 2:
+#if SORT_STEP_USE_DPP_XOR
+      res.d[i] = __builtin_amdgcn_mov_dpp(in.d[i],
+              0x4e, // quad_perm: [2,3,0,1]
+              row_mask, bank_mask, bound_ctrl);
+#else
+      res.d[i] = __builtin_amdgcn_ds_swizzle(in.d[i], 0x081F);
+#endif
+      break;
+    case 4:
+#if SORT_STEP_USE_DPP_XOR
+      res.d[i] = __builtin_amdgcn_mov_dpp(in.d[i],
+              0x114, // row shift right by 4
+              row_mask, 0b1010, bound_ctrl);
+      res.d[i] = __builtin_amdgcn_update_dpp(res.d[i], in.d[i],
+              0x104, // row shift left by 4
+              row_mask, 0b0101, bound_ctrl);
+#else
+      res.d[i] = __builtin_amdgcn_ds_swizzle(in.d[i], 0x101F);
+#endif
+      break;
+    case 8:
+      res.d[i] = __builtin_amdgcn_mov_dpp(in.d[i],
+              0x128, // row right rotate by 8 threads
+              row_mask, bank_mask, bound_ctrl);
+      break;
+    case 16:
+      res.d[i] = __builtin_amdgcn_ds_swizzle(in.d[i], 0x401F);
+      break;
+    case 32: 
+      res.d[i] = __builtin_amdgcn_ds_bpermute(perm_xor, in.d[i]);
+      break;
+    }
+  }
+  return res.v;
+}
+
+template < class NT >
+__device__ FORCEINLINE NT sort_step(NT val, const uint32_t stride) {
+#if !SORT_STEP_USE_BPERMUTE
+  switch(stride) {
+  case 1:
+    return sort_step_const<1>(val);
+  case 2:
+    return sort_step_const<2>(val);
+  case 4:
+    return sort_step_const<4>(val);
+  case 8:
+    return sort_step_const<8>(val);
+  case 16:
+    return sort_step_const<16>(val);
+  case 32:
+    return sort_step_const<32>(val);
+  }
+  return NT{};
+#else
+  return gpuShuffle< ShflType::Xor >(val, stride); 
+#endif // SORT_STEP_USE_BPERMUTE
 }
 
 // K - topk size
@@ -74,18 +168,9 @@ struct BitonicTopK {
 #pragma unroll
       for(int32_t j = i - 1; j >= 0; j--) {
         int32_t bit = biti ^ gpuGetBit(lane, j);
-
-/*
-int __shfl_xor(int var, int lane_mask, int width = WARP_SIZE) {
-    int self = __lane_id();
-    int index = self^lane_mask;
-    index = index >= ((self+width)&~(width-1))?self:index;
-    return __builtin_amdgcn_ds_bpermute(index<<2, var);
-}*/
-        
 #pragma unroll
         for(uint32_t v = 0; v < I; v++) {
-          auto xA = gpuShuffle< ShflType::Xor >(A[v], 1u << j); 
+          auto xA = sort_step(A[v], 1u << j);
           if((bit ^ (A[v] < xA)) == 0) {
             A[v] = xA;
           }
@@ -95,7 +180,7 @@ int __shfl_xor(int var, int lane_mask, int width = WARP_SIZE) {
   }
 
   __device__ FORCEINLINE void merge(KVT& A) {
-    auto xA = gpuShuffle< ShflType::Xor >(A, K); 
+    auto xA = sort_step(A, K); 
     A = A < xA ? xA : A;
   }
 
@@ -136,7 +221,7 @@ int __shfl_xor(int var, int lane_mask, int width = WARP_SIZE) {
       // src = lane ^ (1u << j);
 #pragma unroll      
       for(uint32_t v = 0; v < I; v++) {
-        auto xA = gpuShuffle< ShflType::Xor >(A[v], 1u << j); 
+        auto xA = sort_step(A[v], 1u << j); 
         if((bit ^ (A[v] < xA)) == 0) {
           A[v] = xA;
         }
@@ -304,9 +389,8 @@ int __shfl_xor(int var, int lane_mask, int width = WARP_SIZE) {
 }; // BitonicTopK
 
 template <typename NT>
-__global__ void RunTopK_test(NT* data, uint32_t n, NT* result, uint32_t* result_idxs, uint32_t k) 
+__global__ void RunTopK_test(NT *out) 
 {
-  
   uint32_t lane = threadIdx.x;
   if(lane >= WARP_SIZE)
     return;
@@ -314,7 +398,7 @@ __global__ void RunTopK_test(NT* data, uint32_t n, NT* result, uint32_t* result_
   // auto z = __builtin_amdgcn_ubfe(lane, 0, 1);
   // auto z2 = __builtin_amdgcn_ubfe(lane, 1, 1);
   
-  constexpr uint32_t K = 64;
+  constexpr uint32_t K = 16;
   using TopK = BitonicTopK< K, NT >;
   using KVT = typename TopK::KVT;
   TopK topk;
@@ -342,9 +426,20 @@ __global__ void RunTopK_test(NT* data, uint32_t n, NT* result, uint32_t* result_
   XS(14, 8);
   XS(15, 2);
 
+#if 0
+  A[0].key = lane + 1;
+  auto XA = sort_step<32>(A[0]);
+  auto truth = gpuShuffle< ShflType::Xor >(A[0], 32); 
+  LOUTZ("orig/swapped: %d -- %d truth: %d", A[0].key, XA.key, truth.key);
+  return;
+#endif
+
   LOUTZ("original: A: %d B: %d", A[0].key, B[0].key);
   topk.local_sort(A);
   topk.local_sort(B);
+  // out[lane] = A[0].key;
+  // return;
+
   LOUTZ("local sorted: A: %d; B: %d", A[0].key, B[0].key);
 
   // merge K-sorted runs and keep only K greater elements
@@ -374,10 +469,9 @@ struct TopKKernelParams {
   uint32_t n_total, n_per_block, k;
 };
 
-#define MAX_THREADS_SHUFFLE 256
 
 template < uint32_t K, typename NT>
-__launch_bounds__(MAX_THREADS_SHUFFLE, 1) // HACK HACK
+__launch_bounds__(1024, 1) // HACK HACK
 __global__ void RunTopK_bitonic_shuffle(TopKKernelParams< NT > args) 
 {
   using TopK = BitonicTopK< K, NT >;
@@ -677,6 +771,8 @@ __global__ void RunTopK_subranges(const NT * __restrict__ data, uint32_t n,
 template < class T >
 void TypedTopK(TopkArgs& args) 
 {
+#if !USE_TEST_KERNEL
+
 #define XKERNELS(K) if(args.k <= K) { \
       return std::tuple {             \
         reinterpret_cast< void *>(RunTopK_bitonic_shuffle< K, T>), \
@@ -705,7 +801,7 @@ void TypedTopK(TopkArgs& args)
   dim3 blocks;
   // Example: num = 2049 elems_per_block = 1024 -> 2 blocks
   // num = (2048 + 512) elems_per_block = 1024 -> 3 blocks (so the last block is at least half busy)
-  blocks.x = (args.num_elems + elems_per_block/2) / elems_per_block;
+  blocks.x = std::max((args.num_elems + elems_per_block/2) / elems_per_block, 1u);
   blocks.y = args.batch_size;
   
   // 16Kb per block => 4096 words of mem; 512 threads => 16 elements per thread
@@ -739,6 +835,8 @@ void TypedTopK(TopkArgs& args)
   CU_BEGIN_TIMING(RUN_BENCHMARK)
   (void)cudaLaunchKernel(sort_kernel, blocks, block_sz, kernel_args,
                         shmem_size, 0); 
+  CU_END_TIMING("TopK shuffle N = %zu; K = %u; batch_size: %u", 
+      args.num_elems, args.k, args.batch_size);
 
   if (blocks.x > 1) {
 
@@ -773,17 +871,21 @@ void TypedTopK(TopkArgs& args)
       VLOG(0) << "-------- launching merge kernel #blockSz " << merge_block_sz
              << " n_total " << merge_params.n_total;
     }
+
+    CU_BEGIN_TIMING(RUN_BENCHMARK)
     void* kargs[] = {&merge_params};
     (void)cudaLaunchKernel(merge_kernel, merge_blocks, merge_block_sz, kargs,
                         mshmem_size, 0);
-
-  }
-
-  CU_END_TIMING("TopK N = %zu; K = %u; batch_size: %u", 
+                        
+    CU_END_TIMING("TopK merge N = %zu; K = %u; batch_size: %u", 
       args.num_elems, args.k, args.batch_size);
 
+  }
   CHK(cudaPeekAtLastError());
-  (void)cudaDeviceSynchronize();                       
+  (void)cudaDeviceSynchronize();
+#else
+  RunTopK_test< T ><<<1, WARP_SIZE*2>>>((T *)args.top_elements);
+#endif
 }
 
 void RunBitonicTopK(TopkArgs& args) {

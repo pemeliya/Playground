@@ -8,6 +8,8 @@ if [[ ${debug} -eq 1 ]]; then
   GDB="rocgdb --args "
 fi
 
+export HIP_VISIBLE_DEVICES=13
+# export AMD_LOG_LEVEL=4
 
 pushd build
 rm -f gpucore.*
