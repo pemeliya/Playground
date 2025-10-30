@@ -7,6 +7,7 @@
 #include <iostream>
 #include <random>
 #include <optional>
+#include <fstream>
 
 #include "common/common_utils.hpp"
 #include "common/hipblaslt_gemm.hpp"
@@ -89,14 +90,14 @@ void benchmark(const TypeA *dA, const TypeB *dB,
 
 int main(int argc, char *argv[]) try
 {
-	int m = 1024, n = 500, k = 1024, batch_size = 200,
+	int m = 8192, n = 32768, k = 1024, batch_size = 1,
       mk = std::max(m, k), mn = std::max(m, n),
       nk = std::max(n, k);
-  float alpha{1.0}, beta{0.0};
+  float alpha{1.0}, beta{1.0};
 
-#if 0
-  using TypeA = hip_bfloat16;
-  using TypeB = hip_bfloat16;
+#if 1
+  using TypeA = hipblaslt_f8;
+  using TypeB = hipblaslt_bf8;
   using TypeC = hip_bfloat16;
   using TypeD = hip_bfloat16;
 #else
@@ -106,18 +107,22 @@ int main(int argc, char *argv[]) try
   using TypeD = float;
 #endif
 
-  size_t extra = 0, extra2 = 16*1024*1024;
-  HVector< TypeA > a(mk*mk * batch_size + extra);
-  HVector< TypeB > b(nk*nk * batch_size + extra);
-  HVector< TypeC > c(mn*mn * batch_size + extra);
-  //HVector< TypeD > d(m * n * batch_size + extra); 
+  size_t extra = 0, extra2 = 16;
+  HVector< TypeA > a(m * k * batch_size + extra);
+  HVector< TypeB > b(n * k * batch_size + extra);
+  HVector< TypeC > c(m * n * batch_size + extra);
+  HVector< TypeD > d(m * n * batch_size + extra); 
   HVector< TypeD > bias(m + extra);
+  HVector< float> ascale(4), bscale(4);
 
 #if 1
-  initRange(a.data(), 0.0, 0.02, m*k);
-  initRange(b.data(), 10.0, -0.01, n*k);
-  initRange(c.data(), 0.0, -0.005, m*n);
+  initRange(a.data(), 0.01, 0.002, m*k);
+  initRange(b.data(), 0.0, 0.0, n*k);
+  initRange(c.data(), 0.0, 0.0, m*n);
   initRange(bias.data(), 0.0, -0.15, m);
+  
+  initRange(ascale.data(), 1.0, 0.0, 4);
+  initRange(bscale.data(), 1.0, 0.0, 4);
 #else
   populateRandomVec(a, float{});
   populateRandomVec(b, float{});
@@ -126,55 +131,58 @@ int main(int argc, char *argv[]) try
   initRange(bias.data(), 1.0, 0.0, m);
 #endif
 
+  std::ifstream ifs("/tf/xla/matrixb.bin", std::ios::in | std::ios::binary);
+  if (!ifs) throw std::runtime_error("Unable to open file for reading!");
+
+  ifs.read((char*)a.data(), m*k);
+
   a.copyHToD();
   b.copyHToD();
   c.copyHToD();
+  ascale.copyHToD();
+  bscale.copyHToD();
   bias.copyHToD();
 
   BlasLtGemm gemm;
   BlasLtGemm::Config cfg;
 
-  for(int order_ab = 0; order_ab < 8; order_ab++) {
-  for(int trans_ab = 0; trans_ab < 4; trans_ab++) {
-
-    cfg = BlasLtGemm::Config{
-      .trans_a = trans_ab & 1 ? HIPBLAS_OP_T : HIPBLAS_OP_N,
-      .trans_b = trans_ab & 2 ? HIPBLAS_OP_T : HIPBLAS_OP_N,
+  cfg = BlasLtGemm::Config{
+      .trans_a = HIPBLAS_OP_T,
+      .trans_b = HIPBLAS_OP_N,
       .compute_type = HIPBLAS_COMPUTE_32F,
-      .orderA = order_ab & 1 ? HIPBLASLT_ORDER_ROW : HIPBLASLT_ORDER_COL,
-      .orderB = order_ab & 2 ? HIPBLASLT_ORDER_ROW : HIPBLASLT_ORDER_COL,
-      .orderCD = order_ab & 4 ? HIPBLASLT_ORDER_ROW : HIPBLASLT_ORDER_COL,
+      .orderA = HIPBLASLT_ORDER_ROW,
+      .orderB = HIPBLASLT_ORDER_COL,
+      .orderCD = HIPBLASLT_ORDER_COL,
       .m = m,
       .n = n,
       .k = k,
       .batch_size = batch_size,
       .epilogue = HIPBLASLT_EPILOGUE_DEFAULT,
       .max_algorithms = 16,
-      .max_workspace_size = 1ull << 20,
+      .max_workspace_size = 67108864,
       .stream = 0,
     };
-    benchmark(a.devPtr, b.devPtr, c.devPtr, bias.devPtr,
-      c.devPtr, alpha, beta, cfg);
-  }
-  }
-  return 0;
-#if 0
+
+#if 1
   VLOG(0) << "Running algorithm default";
   auto plan = gemm.createPlan(a.devPtr, b.devPtr, c.devPtr, bias.devPtr,
-      d1.devPtr, alpha, beta, cfg);
+      d.devPtr, alpha, beta, cfg);
 
   auto algos = gemm.getAlgorithms(plan, cfg, bias.devPtr);
+  VLOG(0) << "total algos found " << algos.size();
 
-#if 0
+#if 1
   gemm.run(a.devPtr, b.devPtr, c.devPtr, bias.data(),
-      d1.devPtr, alpha, beta, cfg, plan, algos[0]);
-  d1.copyDToH();
+      d.devPtr, alpha, beta, 
+      ascale.devPtr, bscale.devPtr,
+      cfg, plan, algos[0]);
+  d.copyDToH();
 #else
   matMatMultMixPrec(alpha, beta, m, n, k,
     a.data(), 1, m, // m x k: (k, 1) or (1, m)
     b.data(), 1, k, // n x k: (n, 1) or (1, k)
     c.data(), 1, m, // does not matter
-    d1.data(), 1, m, 
+    d.data(), 1, m, 
     bias.data()); // m x n: (n, 1)  or (1, m)
 #endif
 
@@ -196,29 +204,36 @@ int main(int argc, char *argv[]) try
     return nfailed == 0;
   };
 
-  float tolerance = 0.01f;
-  uint32_t totalFailed = 0, N = algos.size();
-  for(uint32_t i = 0; i < N; i++) {
-#if 1
-    gemm.run(a.devPtr, b.devPtr, c.devPtr, bias.devPtr,
-      d2.devPtr, alpha, beta, cfg, plan, algos[i]);
-    d2.copyDToH();
-#else
-  matMatMultMixPrecEnumerate(alpha, beta, m, n, k,
-    a.data(), b.data(), c.data(), d2.data(), bias.data(), i);
-#endif
-
-    auto OK = check_results(d1, d2, tolerance);
-    auto [index, fallback] = gemm.getAlgoIndex(algos[i]);
-    if(!OK) {
-      VLOG(0) << i << ": algorithm " << index << " accuracy mismatch vs CPU algorithm!";
-      totalFailed++;
-    } else {
-      VLOG(0) << i << ": algorithm " << index << " OK";
+  for (int i = 0; i < d.size(); i++) {
+    float z = (float)d[i];
+    if (std::abs(z) > 1e5) {
+      VLOG(0) << i << " -- " << z;
     }
   }
-  VLOG(0) << "Accuracy check failed for " << totalFailed << " out of " 
-      << algos.size() << " algorithms!";
+
+//   float tolerance = 0.01f;
+//   uint32_t totalFailed = 0, N = algos.size();
+//   for(uint32_t i = 0; i < N; i++) {
+// #if 0
+//     gemm.run(a.devPtr, b.devPtr, c.devPtr, bias.devPtr,
+//       d2.devPtr, alpha, beta, cfg, plan, algos[i]);
+//     d2.copyDToH();
+// #else
+//   matMatMultMixPrecEnumerate(alpha, beta, m, n, k,
+//     a.data(), b.data(), c.data(), d2.data(), bias.data(), i);
+// #endif
+
+//     auto OK = check_results(d1, d2, tolerance);
+//     auto [index, fallback] = gemm.getAlgoIndex(algos[i]);
+//     if(!OK) {
+//       VLOG(0) << i << ": algorithm " << index << " accuracy mismatch vs CPU algorithm!";
+//       totalFailed++;
+//     } else {
+//       VLOG(0) << i << ": algorithm " << index << " OK";
+//     }
+//   }
+//   VLOG(0) << "Accuracy check failed for " << totalFailed << " out of " 
+//       << algos.size() << " algorithms!";
 #endif
   return 0;
 }

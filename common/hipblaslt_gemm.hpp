@@ -30,7 +30,7 @@
 
 
 
-#if HIPBLASLT_VERSION_MINOR < 6
+#if false && HIPBLASLT_VERSION_MINOR < 6
 #define hipDataType hipblasDatatype_t
 #define HIP_R_16F HIPBLAS_R_16F
 #define HIP_R_16BF HIPBLAS_R_16B
@@ -95,10 +95,10 @@ inline std::ostream& operator<<(std::ostream& os, hipDoubleComplex Z) {
 template < class T >
 constexpr hipDataType HipBlasltType(const T *) {
 
-  // if constexpr (std::is_same_v<T, __hip_fp8_e5m2_fnuz>) 
-  //   return HIP_R_8F_E5M2_FNUZ;
-  // if constexpr (std::is_same_v<T, __hip_fp8_e4m3_fnuz>) 
-  //   return HIP_R_8F_E4M3_FNUZ;
+  if constexpr (std::is_same_v<T, hipblaslt_bf8>) 
+    return HIP_R_8F_E5M2;
+  if constexpr (std::is_same_v<T, hipblaslt_f8>) 
+    return HIP_R_8F_E4M3;
   if constexpr (std::is_same_v<T, __half>) 
     return HIP_R_16F;
   if constexpr (std::is_same_v<T, hip_bfloat16>) 
@@ -173,7 +173,7 @@ struct HipMatrixLayout {
       SetAttr(handle, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, 
             *batch_stride);
 
-      SetAttr(handle, HIPBLASLT_MATRIX_LAYOUT_ORDER, order);
+      // SetAttr(handle, HIPBLASLT_MATRIX_LAYOUT_ORDER, order);
     }
     ~HipMatrixLayout() {
       if(handle != hipblasLtMatrixLayout_t{}) {
@@ -260,23 +260,23 @@ struct BlasLtGemm {
   MatmulPlan createPlan(const TypeA *dA, const TypeB *dB, const TypeC *dC, const TypeD *dBias,
       TypeD *dD, Scalar alpha, Scalar beta, const Config& cfg) {
 
+    auto rowA = cfg.m, colA = cfg.k, 
+         rowB = cfg.k, colB = cfg.n;
+
+    if (cfg.trans_a != HIPBLAS_OP_N) std::swap(rowA, colA);
+    if (cfg.trans_b != HIPBLAS_OP_N) std::swap(rowB, colB);
+
     MatmulPlan plan = {
       .desc = HipMatmulDesc(cfg.compute_type, HipBlasltType(&alpha),
             cfg.trans_a, cfg.trans_b, cfg.epilogue),
-      .matA = HipMatrixLayout(HipBlasltType(dA), cfg.m, cfg.k, cfg.orderA, cfg.batch_size),
-      .matB = HipMatrixLayout(HipBlasltType(dB), cfg.k, cfg.n, cfg.orderB, cfg.batch_size),
+      .matA = HipMatrixLayout(HipBlasltType(dA), rowA, colA, cfg.orderA, cfg.batch_size, rowA),
+      .matB = HipMatrixLayout(HipBlasltType(dB), rowB, colB, cfg.orderB, cfg.batch_size, rowB),
       .matC = HipMatrixLayout(HipBlasltType(dC), cfg.m, cfg.n, cfg.orderCD, cfg.batch_size),
       .matD = HipMatrixLayout(HipBlasltType(dD), cfg.m, cfg.n, cfg.orderCD, cfg.batch_size),
     };
 
     return std::move(plan);
   }
-
-  // template <typename T>
-  // void  SetAttr(hipblasLtMatmulDesc_t handle,
-  //                    hipblasLtMatmulDescAttributes_t attr, T value) {
-  //   CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute, handle, attr, value);
-  // }
 
   template < class TypeD >
   std::vector< hipblasLtMatmulHeuristicResult_t > getAlgorithms(
@@ -295,9 +295,20 @@ struct BlasLtGemm {
          plan.desc.handle, HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
              &dtype, sizeof(hipDataType)));
 
-      static int dummy = 0xF0F0F0F0; // actually it's enough to set some non-zero value
+      static int64_t dummy = 0xF0F0F0F0; // actually it's enough to set some non-zero value
 		  CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
 			     plan.desc.handle, HIPBLASLT_MATMUL_DESC_BIAS_POINTER, 
+             &dummy, sizeof(void *)));
+    }
+    
+    {
+      static int64_t dummy = 0xF0F0F0F0; // actually it's enough to set some non-zero value
+    	CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+			     plan.desc.handle, HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER, 
+             &dummy, sizeof(void *)));
+
+      CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+			     plan.desc.handle, HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER, 
              &dummy, sizeof(void *)));
     }
 
@@ -338,7 +349,9 @@ struct BlasLtGemm {
 
   template < class TypeA, class TypeB, class TypeC, class TypeD, class Scalar >
   void run(const TypeA *dA, const TypeB *dB, const TypeC *dC, const TypeD *dBias,
-      TypeD *dD, Scalar alpha, Scalar beta, const Config& cfg, 
+      TypeD *dD, Scalar alpha, Scalar beta, 
+      const Scalar *dScaleA, const Scalar *dScaleB, 
+      const Config& cfg, 
       const MatmulPlan& plan, hipblasLtMatmulHeuristicResult_t algo)
   {
     if (hasBias(cfg.epilogue)) {
@@ -350,6 +363,18 @@ struct BlasLtGemm {
 		  CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
 			    plan.desc.handle, HIPBLASLT_MATMUL_DESC_BIAS_POINTER, 
               &dBias, sizeof(void *)));
+    }
+
+    if (dScaleA != nullptr) {
+      CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+			     plan.desc.handle, HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER, 
+             &dScaleA, sizeof(void *)));
+    }
+
+    if (dScaleB != nullptr) {
+      CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+			     plan.desc.handle, HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER, 
+             &dScaleB, sizeof(void *)));
     }
 
     if(algo.workspaceSize > workspace_sz_) {

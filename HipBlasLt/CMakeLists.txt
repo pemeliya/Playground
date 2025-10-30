@@ -14,7 +14,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_EXTENSIONS ON)
 
 file(GLOB INC *.h *.hpp ../common/*.h ../common/*.hpp)
-file(GLOB SRC *.cpp *.cc)
+file(GLOB SRC *.cpp *.cc ../common/*.cc)
 file(GLOB GPU_SRC *.cu.cc)
 
 set(USE_EXTERNAL_HIPBLASLT 0)
