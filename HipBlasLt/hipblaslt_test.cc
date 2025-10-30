@@ -68,8 +68,8 @@ int main(int argc, char *argv[]) try
       .epilogue = HIPBLASLT_EPILOGUE_DEFAULT,
       .max_algorithms = 1,
       .max_workspace_size = 67108864,
-      .use_ascale = false,
-      .use_bscale = false,
+      .use_ascale = true,
+      .use_bscale = true,
       .stream = 0,
     };
 
