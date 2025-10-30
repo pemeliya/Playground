@@ -39,7 +39,7 @@
 #include "common/mersenne.h"
 
 
-void DeviceInit(int dev = 0);
+void DeviceInit(int dev = 0, bool cleanupGpuMem = false);
 
 class GpuTimer
 {
@@ -57,10 +57,6 @@ template < class NT >
 struct HVector : std::vector< NT > {
    
    using Base = std::vector< NT >;
-
-//    HVector(Base&& b) noexcept : Base(std::move(b)) {
-//        CHK(cudaMalloc((void**)&devPtr, Base::size()*sizeof(NT)))
-//    }
 
    HVector() = default;
 
@@ -82,14 +78,24 @@ struct HVector : std::vector< NT > {
      Base::swap(lhs);
    }
 
-   HVector(std::initializer_list< NT > l) : Base(l) {
-       CHK(cudaMalloc((void**)&devPtr, l.size()*sizeof(NT)))
+   explicit HVector(std::initializer_list< NT > l, bool useUncachedMem = false) : Base(l) {
+#if COMPILE_FOR_ROCM
+     CHK(hipExtMallocWithFlags((void**)&devPtr, l.size()*sizeof(NT), 
+            useUncachedMem ? hipDeviceMallocUncached : hipDeviceMallocDefault));
+#else
+     CHK(cudaMalloc((void**)&devPtr, l.size()*sizeof(NT)));
+#endif
    }
-   HVector(size_t N, bool allocHost = true) {
-      if (allocHost) {
+   HVector(size_t N, bool allocHost = true, bool useUncachedMem = false) {
+     if (allocHost) {
         Base::resize(N, NT{});
-      }
-      CHK(cudaMalloc((void**)&devPtr, N*sizeof(NT)))
+     }
+#if COMPILE_FOR_ROCM
+     CHK(hipExtMallocWithFlags((void**)&devPtr, N*sizeof(NT), 
+            useUncachedMem ? hipDeviceMallocUncached : hipDeviceMallocDefault));
+#else
+     CHK(cudaMalloc((void**)&devPtr, N*sizeof(NT)));
+#endif
    }
    void copyHToD() {
       //if (Base::empty()) throw std::runtime_error("copyHToD empty!");

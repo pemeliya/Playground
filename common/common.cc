@@ -51,7 +51,25 @@ GPUStream::~GPUStream() {
   (void)cudaStreamDestroy(handle_);
 }
 
-void DeviceInit(int dev)
+void cleanupGpuMem() {
+  size_t free_bytes = 0, total_bytes = 0;
+  CHK(cudaMemGetInfo(&free_bytes, &total_bytes));
+  free_bytes -= (2<<20);
+
+  float mem = (float)free_bytes / (1<<20);
+  VLOG(0) << "Cleaning up " << mem << "Mb device memory!";
+  
+  void* ptr = nullptr;
+  CHK(cudaMalloc(&ptr, free_bytes));
+ 
+  // memset bytes to 0xFF (-1)
+  CHK(cudaMemset(ptr, 0xFF, free_bytes));
+ 
+  CHK(cudaFree(ptr));
+  CHK(cudaDeviceSynchronize());
+}
+
+void DeviceInit(int dev, bool cleanupMem)
 {
     int deviceCount;
     CHK(cudaGetDeviceCount(&deviceCount));
@@ -73,20 +91,18 @@ void DeviceInit(int dev)
     }
 
     auto device_giga_bandwidth = float(deviceProp.memoryBusWidth) * deviceProp.memoryClockRate * 2 / 8 / 1000 / 1000;
-    {
-        //printf("%llu --- %llu\n", device_free_physmem, device_total_physmem);
-        printf("Using device %d: %s ( SM%d, %d SMs, "
-                        "%lld free / %lld total MB physmem, "
-                        "%.3f GB/s @ %d kHz mem clock, ECC %s)\n",
-                    dev,
-                    deviceProp.name,
-                    deviceProp.major * 100 + deviceProp.minor * 10,
-                    deviceProp.multiProcessorCount,
-                    (unsigned long long) device_free_physmem / 1024 / 1024,
-                    (unsigned long long) device_total_physmem / 1024 / 1024,
-                    device_giga_bandwidth,
-                    deviceProp.memoryClockRate,
-                    (deviceProp.ECCEnabled) ? "on" : "off");
-        fflush(stdout);
-    }
+
+    printf("Using device %d: %s ( SM%d, %d SMs, "
+                 "%lld free / %lld total MB physmem, "
+                 "%.3f GB/s @ %d kHz mem clock, ECC %s)\n",
+        dev, deviceProp.name,
+        deviceProp.major * 100 + deviceProp.minor * 10,
+        deviceProp.multiProcessorCount,
+        (unsigned long long) device_free_physmem / 1024 / 1024,
+        (unsigned long long) device_total_physmem / 1024 / 1024,
+         device_giga_bandwidth,
+         deviceProp.memoryClockRate,
+        (deviceProp.ECCEnabled) ? "on" : "off");
+    fflush(stdout);
+    if (cleanupMem) cleanupGpuMem();
 }

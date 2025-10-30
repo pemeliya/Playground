@@ -88,12 +88,17 @@ void benchmark(const TypeA *dA, const TypeB *dB,
         o2s(cfg.orderA), o2s(cfg.orderB), o2s(cfg.orderCD));
 }
 
+template <typename T>
+using Xvec = MappedVector<T>;
+
 int main(int argc, char *argv[]) try
 {
+  // DeviceInit(0, true);
+
 	int m = 8192, n = 32768, k = 1024, batch_size = 1,
       mk = std::max(m, k), mn = std::max(m, n),
       nk = std::max(n, k);
-  float alpha{1.0}, beta{1.0};
+  float alpha{1.0}, beta{1}, Xascale{1}, Xbscale{1};
 
 #if 1
   using TypeA = hipblaslt_f8;
@@ -107,13 +112,13 @@ int main(int argc, char *argv[]) try
   using TypeD = float;
 #endif
 
-  size_t extra = 0, extra2 = 16;
-  HVector< TypeA > a(m * k * batch_size + extra);
-  HVector< TypeB > b(n * k * batch_size + extra);
-  HVector< TypeC > c(m * n * batch_size + extra);
-  HVector< TypeD > d(m * n * batch_size + extra); 
-  HVector< TypeD > bias(m + extra);
-  HVector< float> ascale(4), bscale(4);
+  size_t extra = 0;
+  Xvec< TypeA > a(m * k * batch_size + extra);
+  Xvec< TypeB > b(n * k * batch_size + extra);
+  HVector< TypeC > c(m * n * batch_size + extra, true, true);
+  Xvec< TypeD > d(m * n * batch_size + extra); 
+  Xvec< TypeD > bias(m + extra);
+  Xvec< float> ascale(4), bscale(4);
 
 #if 1
   initRange(a.data(), 0.01, 0.002, m*k);
@@ -121,8 +126,8 @@ int main(int argc, char *argv[]) try
   initRange(c.data(), 0.0, 0.0, m*n);
   initRange(bias.data(), 0.0, -0.15, m);
   
-  initRange(ascale.data(), 1.0, 0.0, 4);
-  initRange(bscale.data(), 1.0, 0.0, 4);
+  initRange(ascale.data(), Xascale, 0.0, 4);
+  initRange(bscale.data(), Xbscale, 0.0, 4);
 #else
   populateRandomVec(a, float{});
   populateRandomVec(b, float{});
@@ -131,10 +136,9 @@ int main(int argc, char *argv[]) try
   initRange(bias.data(), 1.0, 0.0, m);
 #endif
 
-  std::ifstream ifs("/tf/xla/matrixb.bin", std::ios::in | std::ios::binary);
-  if (!ifs) throw std::runtime_error("Unable to open file for reading!");
-
-  ifs.read((char*)a.data(), m*k);
+  // std::ifstream ifs("/tf/xla/matrixb.bin", std::ios::in | std::ios::binary);
+  // if (!ifs) throw std::runtime_error("Unable to open file for reading!");
+  // ifs.read((char*)a.data(), m*k);
 
   a.copyHToD();
   b.copyHToD();
@@ -150,7 +154,7 @@ int main(int argc, char *argv[]) try
       .trans_a = HIPBLAS_OP_T,
       .trans_b = HIPBLAS_OP_N,
       .compute_type = HIPBLAS_COMPUTE_32F,
-      .orderA = HIPBLASLT_ORDER_ROW,
+      .orderA = HIPBLASLT_ORDER_COL,
       .orderB = HIPBLASLT_ORDER_COL,
       .orderCD = HIPBLASLT_ORDER_COL,
       .m = m,
@@ -162,29 +166,6 @@ int main(int argc, char *argv[]) try
       .max_workspace_size = 67108864,
       .stream = 0,
     };
-
-#if 1
-  VLOG(0) << "Running algorithm default";
-  auto plan = gemm.createPlan(a.devPtr, b.devPtr, c.devPtr, bias.devPtr,
-      d.devPtr, alpha, beta, cfg);
-
-  auto algos = gemm.getAlgorithms(plan, cfg, bias.devPtr);
-  VLOG(0) << "total algos found " << algos.size();
-
-#if 1
-  gemm.run(a.devPtr, b.devPtr, c.devPtr, bias.data(),
-      d.devPtr, alpha, beta, 
-      ascale.devPtr, bscale.devPtr,
-      cfg, plan, algos[0]);
-  d.copyDToH();
-#else
-  matMatMultMixPrec(alpha, beta, m, n, k,
-    a.data(), 1, m, // m x k: (k, 1) or (1, m)
-    b.data(), 1, k, // n x k: (n, 1) or (1, k)
-    c.data(), 1, m, // does not matter
-    d.data(), 1, m, 
-    bias.data()); // m x n: (n, 1)  or (1, m)
-#endif
 
   auto check_results = [&](const auto& truth, const auto& test, auto tolerance) {
     int nfailed = 0;
@@ -204,12 +185,41 @@ int main(int argc, char *argv[]) try
     return nfailed == 0;
   };
 
-  for (int i = 0; i < d.size(); i++) {
-    float z = (float)d[i];
-    if (std::abs(z) > 1e5) {
-      VLOG(0) << i << " -- " << z;
-    }
-  }
+  VLOG(0) << "Running algorithm default";
+  auto plan = gemm.createPlan(a.devPtr, b.devPtr, c.devPtr, bias.devPtr,
+      d.devPtr, alpha, beta, cfg);
+
+  auto algos = gemm.getAlgorithms(plan, cfg, bias.devPtr);
+  VLOG(0) << "total algos found " << algos.size();
+
+  for(int ii = 0; ii < 1000; ii++) {
+    VLOG(0) << "iter: " << ii;
+#if 1
+  gemm.run(a.devPtr, b.devPtr, c.devPtr, bias.data(),
+      d.devPtr, alpha, beta, 
+      ascale.devPtr, bscale.devPtr,
+      cfg, plan, algos[0]);
+  d.copyDToH();
+#else
+  matMatMultMixPrec(alpha, beta, m, n, k,
+    a.data(), 1, m, // m x k: (k, 1) or (1, m)
+    b.data(), 1, k, // n x k: (n, 1) or (1, k)
+    c.data(), 1, m, // does not matter
+    d.data(), 1, m, 
+    bias.data()); // m x n: (n, 1)  or (1, m)
+#endif
+
+    auto ptr = d.data();
+    for (int i = 0; i < m; i++) {
+      for (int j = 0; j < n; j++, ptr++) {
+        float z = (float)ptr[0];
+        if (std::abs(z) > 1e5) {
+          VLOG(0) << i << ',' << j << " wrong " << z;
+        }
+      } // for j
+    } // for i
+    cudaDeviceSynchronize();
+  } // for ii
 
 //   float tolerance = 0.01f;
 //   uint32_t totalFailed = 0, N = algos.size();
@@ -234,7 +244,6 @@ int main(int argc, char *argv[]) try
 //   }
 //   VLOG(0) << "Accuracy check failed for " << totalFailed << " out of " 
 //       << algos.size() << " algorithms!";
-#endif
   return 0;
 }
 catch(std::exception& ex) {

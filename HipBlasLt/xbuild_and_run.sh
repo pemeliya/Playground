@@ -10,10 +10,13 @@ fi
 
 export HIP_VISIBLE_DEVICES=0
 # export AMD_LOG_LEVEL=4
-export TENSILE_DB=255
-export HIPBLASLT_LOG_MASK=32
+# export TENSILE_DB=255
+# export HIPBLASLT_LOG_MASK=32
+
+mkdir -p build
 
 pushd build
+cmake .. -DCOMPILE_FOR_ROCM=1 -DCMAKE_BUILD_TYPE=Release
 rm -f gpucore.*
 make -j 2>&1
 $GDB ./bin/hipblaslt_test 2>&1 | tee ../zzzrun.log
