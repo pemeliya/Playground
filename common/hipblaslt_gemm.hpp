@@ -244,6 +244,8 @@ struct BlasLtGemm {
     hipblasLtEpilogue_t epilogue;
     uint64_t            max_algorithms;
     uint64_t            max_workspace_size;
+    bool                use_ascale;
+    bool                use_bscale;
     hipStream_t        stream;
   };
 
@@ -289,24 +291,24 @@ struct BlasLtGemm {
                                               &cfg.max_workspace_size,
                                               sizeof(cfg.max_workspace_size)));
 
+    static int64_t dummy = 0xF0F0F0F0; // actually it's enough to set some non-zero value
     if (hasBias(cfg.epilogue)) {
       auto dtype = HipBlasltType(dBias);
       CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
          plan.desc.handle, HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
              &dtype, sizeof(hipDataType)));
 
-      static int64_t dummy = 0xF0F0F0F0; // actually it's enough to set some non-zero value
 		  CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
 			     plan.desc.handle, HIPBLASLT_MATMUL_DESC_BIAS_POINTER, 
              &dummy, sizeof(void *)));
     }
     
-    {
-      static int64_t dummy = 0xF0F0F0F0; // actually it's enough to set some non-zero value
+    if (cfg.use_ascale) {
     	CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
 			     plan.desc.handle, HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER, 
              &dummy, sizeof(void *)));
-
+    }
+    if (cfg.use_bscale) {
       CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
 			     plan.desc.handle, HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER, 
              &dummy, sizeof(void *)));
@@ -365,13 +367,13 @@ struct BlasLtGemm {
               &dBias, sizeof(void *)));
     }
 
-    if (dScaleA != nullptr) {
+    if (cfg.use_ascale && dScaleA != nullptr) {
       CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
 			     plan.desc.handle, HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER, 
              &dScaleA, sizeof(void *)));
     }
 
-    if (dScaleB != nullptr) {
+    if (cfg.use_bscale && dScaleB != nullptr) {
       CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
 			     plan.desc.handle, HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER, 
              &dScaleB, sizeof(void *)));

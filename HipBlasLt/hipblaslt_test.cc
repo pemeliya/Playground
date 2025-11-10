@@ -89,20 +89,19 @@ void benchmark(const TypeA *dA, const TypeB *dB,
 }
 
 template <typename T>
-using Xvec = MappedVector<T>;
+using Xvec = HVector<T>;
 
 int main(int argc, char *argv[]) try
 {
   // DeviceInit(0, true);
-
-	int m = 8192, n = 32768, k = 1024, batch_size = 1,
+	int m = 262144, n = 131072, k = 1024, batch_size = 1,
       mk = std::max(m, k), mn = std::max(m, n),
       nk = std::max(n, k);
   float alpha{1.0}, beta{1}, Xascale{1}, Xbscale{1};
 
 #if 1
-  using TypeA = hipblaslt_f8;
-  using TypeB = hipblaslt_bf8;
+  using TypeA = hip_bfloat16;
+  using TypeB = hip_bfloat16;
   using TypeC = hip_bfloat16;
   using TypeD = hip_bfloat16;
 #else
@@ -119,6 +118,8 @@ int main(int argc, char *argv[]) try
   Xvec< TypeD > d(m * n * batch_size + extra); 
   Xvec< TypeD > bias(m + extra);
   Xvec< float> ascale(4), bscale(4);
+
+  TypeD *biasPtr = nullptr; //bias.devPtr;
 
 #if 1
   initRange(a.data(), 0.01, 0.002, m*k);
@@ -162,8 +163,10 @@ int main(int argc, char *argv[]) try
       .k = k,
       .batch_size = batch_size,
       .epilogue = HIPBLASLT_EPILOGUE_DEFAULT,
-      .max_algorithms = 16,
+      .max_algorithms = 128,
       .max_workspace_size = 67108864,
+      .use_ascale = false,
+      .use_bscale = false,
       .stream = 0,
     };
 
@@ -186,19 +189,19 @@ int main(int argc, char *argv[]) try
   };
 
   VLOG(0) << "Running algorithm default";
-  auto plan = gemm.createPlan(a.devPtr, b.devPtr, c.devPtr, bias.devPtr,
+  auto plan = gemm.createPlan(a.devPtr, b.devPtr, c.devPtr, biasPtr,
       d.devPtr, alpha, beta, cfg);
 
-  auto algos = gemm.getAlgorithms(plan, cfg, bias.devPtr);
+  auto algos = gemm.getAlgorithms(plan, cfg, biasPtr);
   VLOG(0) << "total algos found " << algos.size();
 
-  for(int ii = 0; ii < 1000; ii++) {
-    VLOG(0) << "iter: " << ii;
+  for(int ii = 0; ii < algos.size(); ii++) {
+    VLOG(0) << "algo: " << ii;
 #if 1
   gemm.run(a.devPtr, b.devPtr, c.devPtr, bias.data(),
       d.devPtr, alpha, beta, 
       ascale.devPtr, bscale.devPtr,
-      cfg, plan, algos[0]);
+      cfg, plan, algos[ii]);
   d.copyDToH();
 #else
   matMatMultMixPrec(alpha, beta, m, n, k,
@@ -213,12 +216,12 @@ int main(int argc, char *argv[]) try
     for (int i = 0; i < m; i++) {
       for (int j = 0; j < n; j++, ptr++) {
         float z = (float)ptr[0];
-        if (std::abs(z) > 1e5) {
+        // check for unexpected values
+        if (std::abs(z) != 0 || !std::isfinite(z)) {
           VLOG(0) << i << ',' << j << " wrong " << z;
         }
       } // for j
     } // for i
-    cudaDeviceSynchronize();
   } // for ii
 
 //   float tolerance = 0.01f;
@@ -247,8 +250,8 @@ int main(int argc, char *argv[]) try
   return 0;
 }
 catch(std::exception& ex) {
-  LOG("Exception: " << ex.what());
+  VLOG(0) << "Exception: " << ex.what();
 }
 catch(...) {
-  LOG("Unknown exception");
+  VLOG(0) << "Unknown exception";
 }
