@@ -237,10 +237,10 @@ struct BlasLtGemm {
     hipblasLtOrder_t   orderA;
     hipblasLtOrder_t   orderB;
     hipblasLtOrder_t   orderCD;
-    int64_t            m;
-    int64_t            n;
-    int64_t            k;
-    int64_t batch_size;
+    uint64_t            m;
+    uint64_t            n;
+    uint64_t            k;
+    uint64_t batch_size;
     hipblasLtEpilogue_t epilogue;
     uint64_t            max_algorithms;
     uint64_t            max_workspace_size;

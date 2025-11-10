@@ -8,11 +8,11 @@ if [[ ${debug} -eq 1 ]]; then
   GDB="rocgdb --args "
 fi
 
-export HIP_VISIBLE_DEVICES=0
+export HIP_VISIBLE_DEVICES=3
 # export GPU_DUMP_CODE_OBJECT=1
 # export AMD_LOG_LEVEL=4
 # export TENSILE_DB=255
-# export HIPBLASLT_LOG_MASK=32
+export HIPBLASLT_LOG_MASK=32
 
 mkdir -p build
 

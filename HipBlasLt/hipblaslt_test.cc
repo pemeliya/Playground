@@ -94,7 +94,7 @@ using Xvec = HVector<T>;
 int main(int argc, char *argv[]) try
 {
   // DeviceInit(0, true);
-	int m = 262144, n = 131072, k = 1024, batch_size = 1,
+	size_t m = 262144, n = 131072, k = 1024, batch_size = 1,
       mk = std::max(m, k), mn = std::max(m, n),
       nk = std::max(n, k);
   float alpha{1.0}, beta{1}, Xascale{1}, Xbscale{1};
@@ -114,8 +114,8 @@ int main(int argc, char *argv[]) try
   size_t extra = 0;
   Xvec< TypeA > a(m * k * batch_size + extra);
   Xvec< TypeB > b(n * k * batch_size + extra);
-  HVector< TypeC > c(m * n * batch_size + extra, true, true);
-  Xvec< TypeD > d(m * n * batch_size + extra); 
+  HVector< TypeC > c(1); //m * n * batch_size + extra);
+  Xvec< TypeD > d(m * n * batch_size + extra, false); 
   Xvec< TypeD > bias(m + extra);
   Xvec< float> ascale(4), bscale(4);
 
@@ -124,7 +124,7 @@ int main(int argc, char *argv[]) try
 #if 1
   initRange(a.data(), 0.01, 0.002, m*k);
   initRange(b.data(), 0.0, 0.0, n*k);
-  initRange(c.data(), 0.0, 0.0, m*n);
+  // initRange(c.data(), 0.0, 0.0, m*n);
   initRange(bias.data(), 0.0, -0.15, m);
   
   initRange(ascale.data(), Xascale, 0.0, 4);
@@ -164,7 +164,7 @@ int main(int argc, char *argv[]) try
       .batch_size = batch_size,
       .epilogue = HIPBLASLT_EPILOGUE_DEFAULT,
       .max_algorithms = 128,
-      .max_workspace_size = 67108864,
+      .max_workspace_size = 76*1024*1024,
       .use_ascale = false,
       .use_bscale = false,
       .stream = 0,
@@ -198,11 +198,11 @@ int main(int argc, char *argv[]) try
   for(int ii = 0; ii < algos.size(); ii++) {
     VLOG(0) << "algo: " << ii;
 #if 1
-  gemm.run(a.devPtr, b.devPtr, c.devPtr, bias.data(),
+  gemm.run(a.devPtr, b.devPtr, c.devPtr, biasPtr,
       d.devPtr, alpha, beta, 
       ascale.devPtr, bscale.devPtr,
       cfg, plan, algos[ii]);
-  d.copyDToH();
+  // d.copyDToH();
 #else
   matMatMultMixPrec(alpha, beta, m, n, k,
     a.data(), 1, m, // m x k: (k, 1) or (1, m)
@@ -212,16 +212,16 @@ int main(int argc, char *argv[]) try
     bias.data()); // m x n: (n, 1)  or (1, m)
 #endif
 
-    auto ptr = d.data();
-    for (int i = 0; i < m; i++) {
-      for (int j = 0; j < n; j++, ptr++) {
-        float z = (float)ptr[0];
-        // check for unexpected values
-        if (std::abs(z) != 0 || !std::isfinite(z)) {
-          VLOG(0) << i << ',' << j << " wrong " << z;
-        }
-      } // for j
-    } // for i
+    // auto ptr = d.data();
+    // for (int i = 0; i < m; i++) {
+    //   for (int j = 0; j < n; j++, ptr++) {
+    //     float z = (float)ptr[0];
+    //     // check for unexpected values
+    //     if (std::abs(z) != 0 || !std::isfinite(z)) {
+    //       VLOG(0) << i << ',' << j << " wrong " << z;
+    //     }
+    //   } // for j
+    // } // for i
   } // for ii
 
 //   float tolerance = 0.01f;

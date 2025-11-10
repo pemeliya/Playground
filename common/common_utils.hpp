@@ -88,7 +88,7 @@ struct HVector : std::vector< NT > {
    }
    HVector(size_t N, bool allocHost = true, bool useUncachedMem = false) {
      if (allocHost) {
-        Base::resize(N, NT{});
+        Base::resize(N);
      }
 #if COMPILE_FOR_ROCM
      CHK(hipExtMallocWithFlags((void**)&devPtr, N*sizeof(NT), 
