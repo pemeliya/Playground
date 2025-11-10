@@ -5,19 +5,7 @@
 #define __HIP_DISABLE_CPP_FUNCTIONS__
 #define LEGACY_HIPBLAS_DIRECT
 
-#define __HIP__
-
-// #if defined(__clang__) && defined(__HIP__)
-// #error ops3
-// #endif
-
-// #ifdef __HIPCC_RTC__
-// #error ops1
-// #else
-// #error ops2
-// #endif
-
-// #include <hip/hip_fp8.h>
+#include <hip/hip_fp8.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_complex.h>
 #include <iostream>
