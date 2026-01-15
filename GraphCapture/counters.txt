@@ -1,0 +1,4 @@
+# Perf counters group 1
+pmc : Wavefronts VALUInsts SALUInsts SFetchInsts FlatVMemInsts LDSInsts FlatLDSInsts GDSInsts VALUUtilization FetchSize
+# Perf counters group 2
+pmc : WriteSize L2CacheHit
