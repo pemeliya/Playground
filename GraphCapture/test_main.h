@@ -200,6 +200,9 @@ public:
     cudaGraphExec_t graphExec;
     bool graphCreated;
     BlasGemm gemm;        // gemm op handle
+    ncclComm_t comm;      // RCCL communicator
+    float *rcclSendBuf = nullptr;  // nGpus * s_rcclElems floats
+    float *rcclRecvBuf = nullptr;  // nGpus * s_rcclElems floats
     double elapsedMs;     // time elapsed per thread
   };
 
@@ -212,6 +215,7 @@ public:
 
   void init_gemm_op(int id);
   void run_gemm_op(int id, int nIters);
+  void run_rccl_op(int id);
 
   void run(size_t numElems, int numIters, bool measureTime = false);
   void run_thread(int id, int numIters);
@@ -222,7 +226,9 @@ private:
   void verify(int id);
 
 private:
+  ncclUniqueId m_ncclId;
   size_t m_nGpus, m_maxElems, m_curElems; // total and current data transfer size
+  static constexpr size_t s_rcclElems = 1024 * 1024; // per-rank chunk for alltoall
 
   bool m_measureTime = false;
   std::vector< ThreadInfo > m_infos;

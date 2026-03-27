@@ -8,7 +8,7 @@ if [[ ${debug} -eq 1 ]]; then
   GDB="rocgdb --args "
 fi
 
-export HIP_VISIBLE_DEVICES=0,1
+export HIP_VISIBLE_DEVICES=0,1,2,3
 
 mkdir -p build
 

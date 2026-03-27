@@ -12,7 +12,7 @@
 #include "test_main.h"
 
 // the number of GPUs communicating (set to -1 to use all available GPUs)
-#define NUM_ACTIVE_GPUS 2
+#define NUM_ACTIVE_GPUS 4
 #define VERIFY_DATA 0
 #define USE_GRAPH_API 1
 
@@ -30,9 +30,11 @@ TestFramework::TestFramework(size_t nGpus, const uint32_t *gpuIDs,
       m_curElems(maxElems), 
       m_infos(nGpus), m_barrier(nGpus), m_pool(nGpus)
 { 
+  CHKNCCL(ncclGetUniqueId(&m_ncclId));
+
   m_pool.runJob([this, gpuIDs](int id) {
 
-     VLOG(0) << "initializing rank " << id;
+    VLOG(0) << "initializing rank " << id;
     auto& info = m_infos[id];
     size_t nBytes = m_maxElems*sizeof(T);
     info.gpuId = gpuIDs != nullptr ? gpuIDs[id] : id;
@@ -40,18 +42,21 @@ TestFramework::TestFramework(size_t nGpus, const uint32_t *gpuIDs,
     info.graphExec = {};
     info.graphCreated = false;
     CHK(cudaSetDevice(info.gpuId));
-    int flags = hipDeviceMallocDefault;
-                //hipDeviceMallocFinegrained;
-                // hipDeviceMallocUncached;
-                // hipMallocSignalMemory;
+
     CHK(cudaStreamCreateWithFlags(&info.stream, cudaStreamNonBlocking));
 
-    // CHK(cudaMemsetAsync(info.sendBuf, s_fillValue ^ 0xFF, nBytes, info.stream));
-    // CHK(cudaMemsetAsync(info.recvBuf, s_fillValue, nBytes, info.stream));
+    size_t totalBytes = s_rcclElems * m_nGpus * sizeof(float);
+    CHK(cudaMalloc(&info.rcclSendBuf, totalBytes));
+    CHK(cudaMalloc(&info.rcclRecvBuf, totalBytes));
+    CHK(cudaMemset(info.rcclSendBuf, 0x42, totalBytes));
+    CHK(cudaMemset(info.rcclRecvBuf, 0, totalBytes));
+
+    CHKNCCL(ncclCommInitRank(&info.comm, m_nGpus, m_ncclId, id));
+
     init_gemm_op(id);
   }); // runJob
   CHK(cudaDeviceSynchronize());
-    VLOG(0) << "Init finished..";
+  VLOG(0) << "Init finished..";
 }
 
 TestFramework::~TestFramework() {
@@ -63,6 +68,9 @@ TestFramework::~TestFramework() {
       (void)cudaGraphDestroy(info.graph);
     }
 #endif
+    (void)ncclCommDestroy(info.comm);
+    (void)cudaFree(info.rcclSendBuf);
+    (void)cudaFree(info.rcclRecvBuf);
     (void)cudaStreamDestroy(info.stream);
   }
 }
@@ -109,6 +117,19 @@ void TestFramework::run_gemm_op(int id, int nIters) {
   info.gemm.run(info.stream, nIters);
 }
 
+void TestFramework::run_rccl_op(int id) {
+
+  auto& info = m_infos[id];
+  CHKNCCL(ncclGroupStart());
+  for(size_t peer = 0; peer < m_nGpus; peer++) {
+    CHKNCCL(ncclSend(info.rcclSendBuf + peer * s_rcclElems,
+          s_rcclElems, ncclFloat, peer, info.comm, info.stream));
+    CHKNCCL(ncclRecv(info.rcclRecvBuf + peer * s_rcclElems,
+          s_rcclElems, ncclFloat, peer, info.comm, info.stream));
+  }
+  CHKNCCL(ncclGroupEnd());
+}
+
 void TestFramework::run_thread(int id, int numIters) 
 {
   m_barrier.wait(); // wait all threads to arrive here before starting timing
@@ -121,23 +142,22 @@ void TestFramework::run_thread(int id, int numIters)
     //CHK(cudaGraphCreate(&info.graph, /*flags=*/0));
 
     CHK(cudaStreamBeginCapture(info.stream, cudaStreamCaptureModeThreadLocal));
-    // CHK(cudaStreamBeginCaptureToGraph(info.stream, info.graph,
-    //         nullptr, nullptr, 0, cudaStreamCaptureModeThreadLocal));
     for(int i = 0; i < 1; i++) {
       run_gemm_op(id, 5);
-      // run_rccl_op(id, i);
-      // run_rccl_op(id, i+1);
+      run_rccl_op(id);
     }
     CHK(cudaStreamEndCapture(info.stream, &info.graph));
 
-    VLOG(0) << "Starting stream capture to existing graph..";
-    CHK(cudaStreamBeginCaptureToGraph(info.stream, info.graph,
-            nullptr, nullptr, 0, cudaStreamCaptureModeThreadLocal));
-    for(int i = 0; i < numIters-1; i++) {
-      run_gemm_op(id, 5);
-      // run_rccl_op(id, i);
-      // run_rccl_op(id, i+1);
-    }
+    // VLOG(0) << "Starting stream capture to existing graph..";
+    // CHK(cudaStreamBeginCaptureToGraph(info.stream, info.graph,
+    //         nullptr, nullptr, 0, cudaStreamCaptureModeThreadLocal));
+    // for(int i = 0; i < numIters-1; i++) {
+    //   // run_gemm_op(id, 5);
+    //   run_rccl_op(id);
+    // }
+
+    CHK(hipGetLastError());
+
     cudaGraph_t graph;
     CHK(cudaStreamEndCapture(info.stream, &graph));
     VLOG(0) << "graph " << graph << " --- " << info.graph;
@@ -154,12 +174,23 @@ void TestFramework::run_thread(int id, int numIters)
 #else
   CPU_BEGIN_TIMING(T); 
   for(int i = 0; i < numIters; i++) {
-    //VLOG(0) << "\n============================ " << m_curElems << " =============================\n";
+    run_rccl_op(id);
+    CHK(hipGetLastError());
     run_gemm_op(id, 2);
+    CHK(hipGetLastError());
   } 
 #endif  
 
   CHK(cudaStreamSynchronize(info.stream));
+
+  auto lastErr = hipGetLastError();
+  if(lastErr != hipSuccess) {
+    PRINTZ("rank %d: hipGetLastError returned sticky error: %s (%d)",
+          id, hipGetErrorString(lastErr), (int)lastErr);
+  } else {
+    VLOG(0) << "rank " << id << ": hipGetLastError = hipSuccess (no sticky error)";
+  }
+
   auto tnow = std::chrono::high_resolution_clock::now();
   std::chrono::duration<double, std::milli> ms = tnow - z1_T;
   size_t bytes = m_curElems*sizeof(T);
