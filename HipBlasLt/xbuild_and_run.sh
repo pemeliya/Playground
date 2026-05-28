@@ -12,7 +12,7 @@ export HIP_VISIBLE_DEVICES=3
 # export GPU_DUMP_CODE_OBJECT=1
 # export AMD_LOG_LEVEL=4
 # export TENSILE_DB=255
-export HIPBLASLT_LOG_MASK=32
+# export HIPBLASLT_LOG_MASK=32
 
 mkdir -p build
 
@@ -20,6 +20,7 @@ pushd build
 cmake .. -DCOMPILE_FOR_ROCM=1 -DCMAKE_BUILD_TYPE=Release
 rm -f gpucore.*
 make -j 2>&1
+LD_PRELOAD=/tf/clr/build/hipamd/lib/libamdhip64.so \
 $GDB ./bin/hipblaslt_test 2>&1 | tee ../zzzrun.log
 popd
 

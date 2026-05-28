@@ -7,14 +7,13 @@
 #include <random>
 #include "common/threading.hpp"
 #include "common/common_utils.hpp"
-#include "common/roc_profiler.h"
 
 #include "test_main.h"
 
 // the number of GPUs communicating (set to -1 to use all available GPUs)
 #define NUM_ACTIVE_GPUS 8
 #define VERIFY_DATA 0
-#define USE_GRAPH_API 1
+#define USE_GRAPH_API 0
 
 #define NUM_ELEMS_MIN 0x6000000
 #define NUM_ELEMS_MAX 0x6000000
@@ -111,20 +110,6 @@ void TestFramework::verify(int id) {
   }
   auto dst = m_hostBuf.data();
   CHK(cudaMemcpy(dst, m_infos[id].recvBuf, sz*sizeof(T), cudaMemcpyDeviceToHost));
-// #if TEST_COLLECTIVE_PERMUTE
-  // auto t = (id - 1 + m_nGpus) % m_nGpus;
-  // VLOG(0) << "Device " << id << " verifying: expecting data from: " << t;
-  // for(uint32_t j = 0, num = 0; j < m_curElems; j++) {
-  //   auto truth = getElement(t, j);
-  //   if(dst[j] != truth) {
-  //     //ThrowError<>("%d: verify failed truth: %f gpu: %f", j, truth, dst[j]);
-  //     PRINTZ("0x%X/%d: verify failed truth: %d gpu: %d (%X)", j, j, 
-  //             truth, dst[j], dst[j]);
-  //     if(num++ >= 5)
-  //       break;
-  //   }
-  // }
-// #endif
 }
 
 void TestFramework::run_rccl_op(int id, int iter) 
@@ -290,10 +275,8 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
   int nGpus = 0, nwarmups = 10, niters = 20;
   CHK(hipGetDeviceCount(&nGpus));
   if(NUM_ACTIVE_GPUS > 0) nGpus = NUM_ACTIVE_GPUS;
-  VLOG("Num devices: " << nGpus << "; max data size: " << 
-      (double)(elemsMax*sizeof(TestFramework::T))/(1024*1024) << 
-        " Mb; neighbour exchange with RCCL"
-  );
+  VLOG(0) << "Num devices: " << nGpus;
+  
   
   std::vector< uint32_t > deviceAssignment{0, 1, 2, 3, 4, 5, 6, 7 };
   if(nGpus > deviceAssignment.size()) {
@@ -312,22 +295,12 @@ void runRCCLTest(size_t elemsMin, size_t elemsMax)
   obj.run(elemsMin, nwarmups);
   //s.stop();
 
-#if 1
   for(size_t sz = elemsMin; sz <= elemsMax; ) {
     obj.run(sz, niters, true);
     if(sz == elemsMax)
       break;
     sz = std::min(sz * 3 / 2, elemsMax);
   }
-#else
-  for(size_t sz = elemsMax; sz >= elemsMin; ) {
-    obj.run(sz, niters, true);
-    if(sz == elemsMin)
-      break;
-    sz = std::max(sz * 2 / 3, elemsMin);
-  }
-#endif
-
 }
 // NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,COLL
 
