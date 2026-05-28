@@ -23,7 +23,7 @@ make -j 2>&1
 
 export NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=PROFILE 
 #export NCCL_RUNTIME_CONNECT=0
-export LD_PRELOAD= #/tf/clr/build/hipamd/lib/libamdhip64.so 
+export LD_PRELOAD=/tf/rocm-systems/projects/rccl/build/librccl.so
 
 $GDB ./bin/RCCL_bubbles 2>&1 | tee ../zzzrun.log
 popd
