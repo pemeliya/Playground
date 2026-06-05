@@ -230,6 +230,12 @@ struct BlasLtGemm {
     }
   }
 
+  enum ScaleMode {
+    kNone,
+    kTensorScaling,
+    kBlockScaling,
+  };
+
   struct Config {
     hipblasOperation_t trans_a;
     hipblasOperation_t trans_b;
@@ -244,8 +250,7 @@ struct BlasLtGemm {
     hipblasLtEpilogue_t epilogue;
     uint64_t            max_algorithms;
     uint64_t            max_workspace_size;
-    bool                use_ascale;
-    bool                use_bscale;
+    ScaleMode           scale_mode;
     hipStream_t        stream;
   };
 
@@ -303,15 +308,23 @@ struct BlasLtGemm {
              &dummy, sizeof(void *)));
     }
     
-    if (cfg.use_ascale) {
+    if (cfg.scale_mode == kTensorScaling || cfg.scale_mode == kBlockScaling) {
     	CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
 			     plan.desc.handle, HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER, 
              &dummy, sizeof(void *)));
-    }
-    if (cfg.use_bscale) {
       CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
 			     plan.desc.handle, HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER, 
              &dummy, sizeof(void *)));
+    }
+    if (cfg.scale_mode == kBlockScaling) {
+      hipblasLtMatmulMatrixScale_t mx_scale =
+                HIPBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+      CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+			     plan.desc.handle, HIPBLASLT_MATMUL_DESC_A_SCALE_MODE, 
+                &mx_scale, sizeof(mx_scale)));
+      CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+			     plan.desc.handle, HIPBLASLT_MATMUL_DESC_B_SCALE_MODE, 
+                &mx_scale, sizeof(mx_scale)));
     }
 
     std::vector< hipblasLtMatmulHeuristicResult_t > 
@@ -367,13 +380,13 @@ struct BlasLtGemm {
               &dBias, sizeof(void *)));
     }
 
-    if (cfg.use_ascale && dScaleA != nullptr) {
+    if (cfg.scale_mode != kNone && dScaleA != nullptr) {
       CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
 			     plan.desc.handle, HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER, 
              &dScaleA, sizeof(void *)));
     }
 
-    if (cfg.use_bscale && dScaleB != nullptr) {
+    if (cfg.scale_mode != kNone && dScaleB != nullptr) {
       CHK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
 			     plan.desc.handle, HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER, 
              &dScaleB, sizeof(void *)));
